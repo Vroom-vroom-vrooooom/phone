@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>차곡 · 여행에서 기억까지</title>
+<style>
+:root{--paper:#f7f7f2;--ink:#263d34;--muted:#788476;--line:#dce2d7}*{box-sizing:border-box}body{margin:0;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;background:#eeeee8;color:var(--ink)}button,select{font:inherit;color:inherit}button,a,select{-webkit-tap-highlight-color:transparent}button{cursor:pointer}button:focus-visible,a:focus-visible,select:focus-visible{outline:3px solid #bc7d56;outline-offset:3px}header{display:flex;align-items:center;justify-content:space-between;gap:20px;height:76px;padding:0 32px;background:var(--paper);border-bottom:1px solid var(--line)}.brand{display:flex;align-items:center;gap:12px}.mark{width:38px;height:38px;border-radius:12px;background:var(--ink);color:#f0e7c9;display:grid;place-items:center;font-size:25px}.brand strong{display:block;font-size:21px;letter-spacing:-1px}.brand small{display:block;font-size:9px;letter-spacing:2px;color:var(--muted);margin-top:3px}.modes{display:flex;background:#e6eadf;border-radius:12px;padding:4px;gap:3px}.modes button{border:0;background:none;padding:9px 15px;border-radius:9px;font-size:12px;color:var(--muted)}.modes button.active{background:white;color:var(--ink);box-shadow:0 2px 5px #263d3410}.version{font-size:10px;color:var(--muted);letter-spacing:1px}main{max-width:1900px;margin:auto;padding:24px 32px}.flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:25px}.flow-label{font-size:11px;color:var(--muted);margin-right:7px}.flow button{border:1px solid #d7ded0;background:#f9f9f3;border-radius:20px;padding:8px 14px;font-size:11px}.flow button.active{border-color:#718767;background:#e3eadb;color:#3d5838}.flow-arrow{color:#a5ac9c;font-size:11px}.boards{display:grid;grid-template-columns:minmax(0,1fr) var(--phone-width,330px);align-items:center;gap:32px}.pane{min-width:0}.pane-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.pane-heading h2{font-size:12px;font-weight:600;margin:0;display:flex;align-items:center;gap:8px}.pill{font-size:9px;font-weight:400;color:#8a9580;letter-spacing:1.2px}.open{font-size:10px;color:#849079;text-decoration:none}.open:hover{text-decoration:underline}.controls{display:flex;gap:6px;margin-bottom:16px;align-items:center}.controls select{flex:1;min-width:0;width:0;font-size:12px;padding:11px 9px;border:1px solid #d6ddcf;border-radius:9px;background:#f9faf4}.controls button{border:1px solid #d6ddcf;background:#f9faf4;border-radius:9px;width:35px;height:39px;font-size:18px}.controls button:disabled{opacity:.3;cursor:default}.viewport{position:relative;width:100%;overflow:hidden;filter:drop-shadow(0 16px 20px #2b402719)}.viewport iframe{position:absolute;left:0;top:0;border:0;transform-origin:top left;display:block;background:transparent}.car-window{border-radius:19px}.phone-window{border-radius:29px}.pane-note{font-size:10px;color:#8a9580;line-height:1.7;margin:13px 0 0;text-align:center}.readme{border-top:1px solid var(--line);margin-top:26px;padding-top:17px;display:flex;justify-content:space-between;gap:15px;font-size:10px;line-height:1.8;color:#8d9585}.readme strong{font-weight:500;color:#6c7d60}.status{font-size:12px;padding:22px;color:#a15f3f}.single-phone .boards{display:flex;justify-content:center}.single-phone .car-pane{display:none}.single-phone .phone-pane{width:var(--single-phone-width,390px)}.single-car .boards{display:block;max-width:1360px;margin:auto}.single-car .phone-pane{display:none}.single-car .car-pane{width:100%}[hidden]{display:none!important}@media(max-width:1000px){header{padding:0 20px}.version{display:none}main{padding:22px 20px}.boards{gap:20px}.pill{display:none}.controls select{font-size:11px}}@media(max-width:700px){header{height:68px;padding:0 14px;gap:10px}.brand{gap:8px}.mark{height:30px;width:30px;font-size:21px;border-radius:9px}.brand strong{font-size:18px}.brand small{font-size:8px}.modes button{font-size:10px;padding:8px 9px}main{padding:18px 14px}.flow{gap:6px;margin-bottom:22px}.flow-label{width:100%;margin-bottom:3px}.flow button{font-size:10px;padding:7px 10px}.boards{display:flex;flex-direction:column;gap:30px}.car-pane{width:100%}.phone-pane{width:min(390px,100%)}.readme{flex-direction:column;gap:4px}.single-phone .phone-pane{width:min(390px,100%)}.controls{margin-bottom:12px}}
+header{border-bottom:0;background:transparent}.brand{gap:0}.brand>div{display:flex;align-items:baseline;gap:12px}.brand strong{font-weight:600}.brand small{font-size:11px;letter-spacing:0;margin:0;color:#8b9088}.version{letter-spacing:0;color:#989d95}.modes{background:#e5e7e1;border-radius:8px;padding:3px}.modes button{border-radius:6px}.modes button.active{box-shadow:none}.flow button{border-color:transparent;background:transparent;border-radius:6px;color:#8b9287}.flow button.active{background:#e0e5da;border-color:transparent;color:#3d5838}.flow-arrow{opacity:.4}.flow-label{font-size:10px;color:#92998c}.readme{border-top:0;padding-top:8px;margin-top:24px;color:#a0a59b;font-size:10px}.pane-heading h2{font-weight:500}.controls select,.controls button{background:#f5f6f0;border-color:#e1e4da;border-radius:6px}@media(max-width:700px){.brand small{display:none}.brand>div{gap:0}}
+</style>
+</head>
+<body>
+<header><div class="brand"><div><strong>차곡</strong><small>화면 미리보기</small></div></div><nav class="modes" aria-label="보기 방식"><button data-mode="both" class="active">함께 보기</button><button data-mode="phone">폰만 보기</button><button data-mode="car">차량만 보기</button></nav><span class="version">프로토타입</span></header>
+<main>
+<nav class="flow" aria-label="단계별 흐름"><span class="flow-label">흐름 바로 보기</span><button data-flow="plan">여행 준비</button><span class="flow-arrow">→</span><button data-flow="departure">일정 · 출발</button><span class="flow-arrow">→</span><button data-flow="drive">주행 · 발견</button><span class="flow-arrow">→</span><button data-flow="record">도착 · 기록</button></nav>
+<p class="status" id="status" role="status">와이어프레임을 불러오고 있어요.</p>
+<div class="boards" id="boards" hidden>
+<section class="pane car-pane"><div class="pane-heading"><h2>차량 디스플레이</h2><a id="car-open" class="open" target="_blank" rel="noopener">크게 보기 ↗</a></div><div class="controls"><button data-prev="car" aria-label="이전 차량 화면">‹</button><select id="car-select" aria-label="차량 와이어프레임 선택"></select><button data-next="car" aria-label="다음 차량 화면">›</button></div><div class="viewport car-window"><iframe id="car-frame" title="차량 와이어프레임" sandbox="allow-same-origin allow-scripts" width="1280" height="576"></iframe></div></section>
+<section class="pane phone-pane"><div class="pane-heading"><h2>모바일 <span class="pill">PLAN · COLLECT · REMEMBER</span></h2><a id="phone-open" class="open" target="_blank" rel="noopener">크게 보기 ↗</a></div><div class="controls"><button data-prev="phone" aria-label="이전 폰 화면">‹</button><select id="phone-select" aria-label="폰 와이어프레임 선택"></select><button data-next="phone" aria-label="다음 폰 화면">›</button></div><div class="viewport phone-window"><iframe id="phone-frame" title="폰 와이어프레임" sandbox="allow-same-origin allow-scripts" width="390" height="844"></iframe></div></section>
+</div>
+<div class="readme"><span>차곡 · 화면 미리보기</span><span>음성·내비 연동 전</span></div>
+</main>
+<script>
+const el=id=>document.getElementById(id);
+let pages=[],state={phone:1,car:14,mode:'both'},latestPlan=null,savedPlaces=[];
+const presets={plan:[3,14],departure:[9,14],drive:[8,15],record:[12,18]};
+function size(){
+ const desktop=innerWidth>700;
+ const ratio=desktop?Math.min(1,Math.max(.58,(innerHeight-300)/844)):1;
+ document.documentElement.style.setProperty('--phone-width',Math.round(390*ratio)+'px');
+ document.documentElement.style.setProperty('--single-phone-width',Math.round(390*ratio)+'px');
+ for(const [name,w,h] of [['car',1280,576],['phone',390,844]]){
+  const frame=el(name+'-frame'),box=frame.parentElement;if(!box.clientWidth)continue;
+  const scale=box.clientWidth/w;frame.style.width=w+'px';frame.style.height=h+'px';frame.style.transform='scale('+scale+')';box.style.height=h*scale+'px';
+ }
+}
+function render(writeHash=true){
+ document.body.className=state.mode==='both'?'':'single-'+state.mode;
+ document.querySelectorAll('[data-mode]').forEach(b=>{b.classList.toggle('active',b.dataset.mode===state.mode);b.setAttribute('aria-pressed',b.dataset.mode===state.mode)});
+ for(const group of ['phone','car']){
+  const list=pages.filter(p=>p.group===group),page=list.find(p=>p.id===state[group])||list[0];state[group]=page.id;
+  el(group+'-select').value=page.id;
+  const frame=el(group+'-frame');
+  // Each iframe stays mounted; only its application content changes.
+  if(!frame.getAttribute('src'))frame.src=group==='car'?'wireframes/14.html':'wireframes/01.html';
+  if(frame.dataset.ready==='true'&&frame.dataset.rendered!==String(page.id)){
+   frame.contentWindow.postMessage({type:'chagok-'+group+'-screen',screen:page.id},location.origin);
+   frame.dataset.rendered=String(page.id);
+  }
+  frame.title=page.title;el(group+'-open').href=page.src;
+  document.querySelector('[data-prev="'+group+'"]').disabled=page.id===list[0].id;
+  document.querySelector('[data-next="'+group+'"]').disabled=page.id===list[list.length-1].id;
+ }
+ document.querySelectorAll('[data-flow]').forEach(b=>{const pair=presets[b.dataset.flow];b.classList.toggle('active',pair[0]===state.phone&&pair[1]===state.car)});
+ if(writeHash)history.replaceState(null,'','#phone='+state.phone+'&car='+state.car+'&view='+state.mode);
+ size();
+}
+function fromHash(){const p=new URLSearchParams(location.hash.slice(1));const phone=Number(p.get('phone')),car=Number(p.get('car'));if(phone>=1&&phone<=13)state.phone=phone;if(car>=14&&car<=18)state.car=car;const mode=p.get('view');if(['both','phone','car'].includes(mode))state.mode=mode;}
+document.addEventListener('click',event=>{
+ const button=event.target.closest('button');if(!button||!pages.length)return;
+ if(button.dataset.mode)state.mode=button.dataset.mode;
+ if(button.dataset.flow){[state.phone,state.car]=presets[button.dataset.flow];state.mode='both'}
+ const group=button.dataset.prev||button.dataset.next;
+ if(group){const list=pages.filter(p=>p.group===group),index=list.findIndex(p=>p.id===state[group]);state[group]=list[Math.max(0,Math.min(list.length-1,index+(button.dataset.next?1:-1)))].id}
+ render();
+});
+for(const group of ['phone','car'])el(group+'-select').addEventListener('change',event=>{state[group]=Number(event.target.value);render()});
+window.addEventListener('message',event=>{
+ if(event.origin!==location.origin||!pages.length)return;
+ const group=['phone','car'].find(g=>el(g+'-frame').contentWindow===event.source);if(!group)return;
+ const d=event.data;if(!d||typeof d!=='object')return;
+ if(d.type==='chagok-ready'&&d.group===group){el(group+'-frame').dataset.ready='true';render(false);if(group==='car'&&latestPlan)event.source.postMessage({type:'chagok-plan',plan:latestPlan},location.origin);if(group==='phone')savedPlaces.forEach(place=>event.source.postMessage({type:'chagok-place-saved',place},location.origin))}
+ if(d.type==='chagok-screen'&&pages.some(p=>p.group===d.group&&p.id===d.screen)){
+  state[d.group]=d.screen;if(group===d.group)el(group+'-frame').dataset.rendered=String(d.screen);else state.mode='both';render();
+ }
+ if(d.type==='chagok-plan'&&group==='phone'&&d.plan){latestPlan=d.plan;state.car=14;state.mode='both';render();if(el('car-frame').dataset.ready==='true')el('car-frame').contentWindow.postMessage({type:'chagok-plan',plan:latestPlan},location.origin)}
+ if(d.type==='chagok-place-saved'&&group==='car'&&d.place){if(!savedPlaces.some(p=>p.id===d.place.id))savedPlaces.push(d.place);if(el('phone-frame').dataset.ready==='true')el('phone-frame').contentWindow.postMessage(d,location.origin)}
+});
+window.addEventListener('resize',size);window.addEventListener('hashchange',()=>{if(pages.length){fromHash();render(false)}});
+new ResizeObserver(size).observe(el('boards'));
+fetch('wireframes/manifest.json').then(r=>{if(!r.ok)throw new Error('manifest '+r.status);return r.json()}).then(data=>{
+ if(!Array.isArray(data)||data.length!==18)throw new Error('invalid wireframe list');pages=data;
+ for(const group of ['phone','car'])for(const page of pages.filter(p=>p.group===group)){const option=document.createElement('option');option.value=page.id;option.textContent=page.title;el(group+'-select').append(option)}
+ el('status').hidden=true;el('boards').hidden=false;fromHash();render();
+}).catch(()=>{el('status').textContent='와이어프레임을 불러오지 못했어요. 로컬 서버 주소로 열고 새로고침해 주세요.'});
+</script>
+</body></html>

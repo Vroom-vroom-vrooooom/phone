@@ -4,7 +4,9 @@
 
 - 차량(Pleos) 앱: https://github.com/Vroom-vroom-vrooooom/pleos
 - 두 앱을 잇는 메시지: [CONTRACT.md](CONTRACT.md) · `domain/TripContract.kt`
-- 원래 웹 목업·백엔드 할 일 정리: https://github.com/Vroom-vroom-vrooooom/prototype
+- 백엔드가 해야 할 것: [BACKEND.md](BACKEND.md)
+- 원본 18개 화면 대응표: [docs/wireframe-map.md](docs/wireframe-map.md)
+- 웹 목업(폰·차량 함께 보기): [mockup/README.md](mockup/README.md) · `node mockup/wireframe-server.cjs`
 
 ## 실행
 

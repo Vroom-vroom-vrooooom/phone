@@ -4,14 +4,36 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Phone ↔ Pleos contract, version 1. This file must stay identical in the `phone` and `pleos` repos.
+ * Phone ↔ Pleos (+ backend → Pleos) contract, version 1. This file must stay identical in the `phone` and `pleos` repos.
  * Change it in both repos together and bump VERSION when a field changes meaning. See CONTRACT.md.
  * Only the payloads are fixed here; the transport (server relay, etc.) is decided with the backend.
  */
 object TripContract {
     const val VERSION = 1
-    /** Intent extra the Pleos app accepts for local testing (adb). */
+    /** Intent extras the Pleos app accepts for local testing (adb). */
     const val EXTRA_TRIP = "chagok.trip"
+    const val EXTRA_SPEAK = "chagok.speak"
+    /** Intent extra the phone app accepts for local testing (adb): one DriveEvent JSON. */
+    const val EXTRA_EVENT = "chagok.event"
+}
+
+/**
+ * Backend → Pleos: a line Chagok should say right now while the trip is running (C02 radio).
+ * `place` (optional) is the place the line talks about; "이 장소 기억해 줘" then saves that place.
+ */
+data class SpeakCommand(val tripId: String, val text: String, val place: Place? = null) {
+    fun toJson(): String = JSONObject().put("v", TripContract.VERSION).put("tripId", tripId).put("text", text)
+        .apply { place?.let { put("place", it.toJson()) } }.toString()
+
+    companion object {
+        fun fromJson(json: String): SpeakCommand {
+            val o = JSONObject(json)
+            require(o.getInt("v") == TripContract.VERSION) { "Unsupported SpeakCommand version ${o.getInt("v")}" }
+            val text = o.getString("text").trim()
+            require(text.isNotEmpty()) { "SpeakCommand text is empty" }
+            return SpeakCommand(o.getString("tripId"), text, o.optJSONObject("place")?.let(::placeFromJson))
+        }
+    }
 }
 
 /** Phone → Pleos: the trip the user confirmed on the phone (P09 "차로 보내기"). */

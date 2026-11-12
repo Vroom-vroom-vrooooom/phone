@@ -1,15 +1,47 @@
 package io.chagok.app.ui
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.DatePickerDialog
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.location.Geocoder
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.animation.OvershootInterpolator
 import android.widget.*
 import io.chagok.app.R
 import io.chagok.app.domain.*
+import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.time.temporal.ChronoUnit
+import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.sin
 
-/** Phone app: P01–P13. Sending to the car is a demo dialog; the car app is a separate APK (src/car). */
+/**
+ * Phone app: P01–P13, laid out after the wireframe canvas (artifact N4BmsuVCA7ZDY79QVjjMvP).
+ * Sends a TripPlan to the Pleos app (pleos repo) and builds the record (P12) from the DriveEvents it sends back.
+ * Until the transport exists, events arrive as an intent extra (see CONTRACT.md).
+ */
 class PhoneActivity : ScreenActivity() {
     override val layout = R.layout.activity_phone
     override val startScreen = Screen.HOME
@@ -18,151 +50,774 @@ class PhoneActivity : ScreenActivity() {
     private val recordedPhotos = linkedSetOf<Int>()
     private var filter = "전체"
     private var photoTab = "제안"
-    private var addedStop = false
+    /** DriveEvents of the latest trip, in arrival order. A different tripId starts a new record. */
+    private val driveEvents = mutableListOf<DriveEvent>()
+    /** Places the user recorded on the phone (P12), as "name\u0001detail". */
+    private val moments = mutableListOf<String>()
+    /** Current-location suggestion on P12: name to detail, or null before/after asking. */
+    private var nearby: Pair<String, String>? = null
+    private var locating = false
+    private var recapIndex = 0
+    private var shownScreen: Screen? = null
+    private lateinit var actions: LinearLayout
+
+    // Wireframe palette (res/values/colors.xml phone_*).
+    private val pInk by lazy { getColor(R.color.phone_ink) }
+    private val pMuted by lazy { getColor(R.color.phone_muted) }
+    private val pLine by lazy { getColor(R.color.phone_line) }
+    private val pFill by lazy { getColor(R.color.phone_fill) }
+    private val pAccent by lazy { getColor(R.color.phone_accent) }
+    private val pAccentSoft by lazy { getColor(R.color.phone_accent_soft) }
+    private val pSurface by lazy { getColor(R.color.phone_surface) }
+
+    /** Screens that show the floating + button; the 5-step setup, arrival, photo picker and recap are full-screen flows. */
+    private val plusScreens = setOf(Screen.HOME, Screen.START, Screen.RECOMMENDATIONS, Screen.ITINERARY, Screen.TIMELINE, Screen.SUMMARY, Screen.MY)
+    /** ponytail: sample stand-in for "far from the route"; the recommendation API will return this. */
+    private val farFromRoute = setOf("jeongdongjin")
+    /** ponytail: sample coordinates for the current-location suggestion; the places API will return real ones. */
+    private val sampleCoords = mapOf(
+        "anmok" to (37.7722 to 128.9473), "chodang" to (37.7915 to 128.9145), "gyeongpo" to (37.7965 to 128.9000),
+        "jeongdongjin" to (37.6908 to 129.0345), "gyeongpodae" to (37.7953 to 128.8964),
+    )
+
+    override fun onCreate(state: Bundle?) {
+        super.onCreate(state)
+        if (state == null) receive(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        receive(intent)
+    }
+
+    /** Pleos → Phone entry point. ponytail: an intent extra stands in for the transport until the backend relay exists. */
+    private fun receive(intent: Intent?) {
+        val json = intent?.getStringExtra(TripContract.EXTRA_EVENT) ?: return
+        intent.removeExtra(TripContract.EXTRA_EVENT)
+        val event = runCatching { DriveEvent.fromJson(json) }.getOrElse {
+            Log.w("ChagokContract", "Ignoring invalid DriveEvent", it); message("차에서 온 기록을 읽지 못했어요."); return
+        }
+        Log.i("ChagokContract", "Phone received $json")
+        if (driveEvents.firstOrNull()?.tripId != event.tripId) driveEvents.clear()
+        driveEvents.add(event)
+        if (event.type == DriveEvent.Type.TRIP_FINISHED) navigate(Screen.TIMELINE) else render()
+    }
 
     override fun render() {
-        content = findViewById(R.id.screen_content)
-        content.removeAllViews()
-        findViewById<TextView>(R.id.screen_title).text = screen.title
-        findViewById<TextView>(R.id.preview_badge).text = "${screen.board} · 샘플 데이터 · 연동 전"
-        findViewById<Button>(R.id.back_button).apply {
-            visibility = if (history.isEmpty()) View.INVISIBLE else View.VISIBLE
-            setOnClickListener { onBackPressed() }
-        }
-        navigation()
+        content = findViewById(R.id.screen_content); content.removeAllViews()
+        actions = findViewById(R.id.bottom_action); actions.removeAllViews(); actions.visibility = View.GONE
+        findViewById<View>(R.id.sheet_overlay).visibility = View.GONE
+        title = "${screen.board} ${screen.title}"
+        if (screen == Screen.START) {
+            // The fan opens over whatever screen + was pressed on.
+            val opened = screen; screen = history.lastOrNull()?.takeIf { it != Screen.START } ?: Screen.HOME
+            draw(); screen = opened; fanOut()
+        } else draw()
+        plusBar()
+        if (shownScreen != screen) { shownScreen = screen; findViewById<ScrollView>(R.id.screen_scroll).let { it.post { it.scrollTo(0, 0) } } }
+    }
+
+    private fun draw() {
         when (screen) {
-            Screen.HOME -> {
-                map(); card("${draft.companions.firstOrNull() ?: "나"}와 ${draft.destination} 드라이브", "${draft.departure} · 장소 ${itineraryIds.size}곳", "다가오는 여행") { navigate(Screen.ITINERARY) }
-                card("저장해 둔 영상에서 다음 여행 찾기", "릴스·쇼츠에서 장소를 모으는 흐름", "발견") { navigate(Screen.RECOMMENDATIONS) }
-                text("지난 여행", 13, muted); card("속초 1박 2일", "10월 · 214 km · 장소 7곳 · 예시") { navigate(Screen.SUMMARY) }
-            }
-            Screen.START -> {
-                card("새 여행 만들기", "목적지부터 5단계로") { navigate(Screen.DESTINATION) }
-                card("릴스·쇼츠 가져오기", "저장한 영상에서 장소 찾기") { navigate(Screen.IMPORT) }
-                card("지금 이 장소 기록", "사진 기록 화면 미리보기 · 실제 위치 미사용") { navigate(Screen.PHOTOS) }
-            }
+            Screen.HOME -> home()
             Screen.DESTINATION -> destination()
-            Screen.COMPANIONS -> {
-                step(2, "동승자 · 복수 선택")
-                listOf("부모님", "아이와 가족", "연인", "친구", "혼자").forEach { label ->
-                    choice(label, label in draft.companions) {
-                        if (label in draft.companions) draft.companions.remove(label)
-                        else { if (label == "혼자") draft.companions.clear() else draft.companions.remove("혼자"); draft.companions.add(label) }; render()
-                    }
-                }
-                button("다음") { if (draft.companions.isEmpty()) message("동승자를 하나 이상 골라 주세요.") else navigate(Screen.INTERESTS) }
-            }
-            Screen.INTERESTS -> {
-                step(3, "관심사 · 최대 3개")
-                choices(listOf("지역 이야기", "맛집", "추억", "역사", "자연·바다", "카페", "사진 명소", "전시·문화", "시장", "산책"), { it in draft.interests }) {
-                    if (it in draft.interests) draft.interests.remove(it) else if (draft.interests.size < 3) draft.interests.add(it) else message("관심사는 3개까지 고를 수 있어요."); render()
-                }
-                button("다음") { if (draft.interests.isEmpty()) message("관심사를 하나 이상 골라 주세요.") else navigate(Screen.MOOD) }
-            }
-            Screen.MOOD -> {
-                step(4, "분위기"); choices(listOf("잔잔한", "활기찬", "감성적인"), { it == draft.mood }) { draft.mood = it; render() }
-                text("일정 밀도"); choices(listOf("느긋", "보통", "알차게"), { it == draft.density }) { draft.density = it; render() }
-                button("다음") { navigate(Screen.IMPORT) }
-            }
-            Screen.IMPORT -> {
-                step(5, "릴스·쇼츠 가져오기"); text("건너뛰어도 일정을 만들 수 있어요.", 14, muted)
-                listOf("유튜브 연결", "공유로 보내기", "인스타 내려받기 파일", "유튜브 시청 기록 파일").forEach { title -> card(title, "연동 예정 · 샘플 화면만 제공") { integration(repository.importFrom(title)) } }
-                text("인스타 계정 연결 · 미지원", 13, muted)
-                button("샘플 장소 추천 보기") { navigate(Screen.RECOMMENDATIONS) }; button("가져오기 건너뛰기", false) { navigate(Screen.ITINERARY) }
-            }
-            Screen.RECOMMENDATIONS -> {
-                text("영상에서 찾은 장소 · 샘플", 15, muted)
-                choices(listOf("전체", "저장", "좋아요", "보낸"), { it == filter }) { filter = it; render() }
-                repository.places.filter { filter == "전체" || it.group == filter }.forEach { place ->
-                    choice("${place.name}\n${place.source}\n${place.reason}", place.id in selectedPlaces) { if (!selectedPlaces.add(place.id)) selectedPlaces.remove(place.id); render() }
-                }
-                button("${selectedPlaces.size}곳을 일정에 담기") { if (selectedPlaces.isEmpty()) message("장소를 하나 이상 골라 주세요.") else { itineraryIds.clear(); itineraryIds.addAll(selectedPlaces); navigate(Screen.ITINERARY) } }
-            }
+            Screen.COMPANIONS -> companions()
+            Screen.INTERESTS -> interests()
+            Screen.MOOD -> mood()
+            Screen.IMPORT -> importVideos()
+            Screen.RECOMMENDATIONS -> recommendations()
             Screen.ITINERARY -> itinerary()
-            Screen.ARRIVAL -> {
-                card("초당 순두부 거리에 도착했어요", "이 장소의 사진 한 장을 남길까요?", "도착 알림 예시")
-                button("사진 남기기") { navigate(Screen.PHOTOS) }; button("나중에", false) { navigate(Screen.TIMELINE) }
-                text("실제 위치 감지·시스템 알림은 연결 전입니다.", 12, muted)
-            }
+            Screen.ARRIVAL -> arrival()
             Screen.PHOTOS -> photos()
-            Screen.TIMELINE -> {
-                text("${draft.destination} · ${draft.departure}", 15, muted); map()
-                card("안목 커피거리", "10:32 · 사진 3 · 메모 1 · 예시") { navigate(Screen.PHOTOS) }
-                card("초당 순두부 거리", "12:34 · 선택한 샘플 사진 ${recordedPhotos.size}장") { navigate(Screen.PHOTOS) }
-                if (!addedStop) card("이름 없는 장소", "15:02 · 새로 들른 곳 제안 · 예시", "기록으로 추가") { addedStop = true; render() } else card("새로운 발자취", "샘플 장소를 기록에 추가했어요")
-                button("여행 요약 보기") { navigate(Screen.SUMMARY) }; button("도착 알림 흐름 보기", false) { navigate(Screen.ARRIVAL) }
-            }
-            Screen.SUMMARY -> {
-                text("${draft.destination} 당일", 23); card("214 km     3곳     2개", "이동 거리     들른 장소     들은 이야기\n통계는 고정된 예시입니다.")
-                card("여행 영상", "사진을 짧은 영상으로") { message("영상 생성은 다음 구현 단계예요.") }
-                card("여행 책자", "경로 + 사진 + 메모 · 사진 5장부터") { message(if (recordedPhotos.size < 5) "샘플 사진을 5장 이상 선택해 주세요." else "책자 생성은 다음 구현 단계예요.") }
-                text("공개 범위 · ${draft.visibility}\n현재 기기 밖으로 전송·공유하지 않아요.", 13, muted)
-                button("공유 · 연동 예정", false) { message("공유 기능은 연결 전입니다.") }
-            }
+            Screen.TIMELINE -> timeline()
+            Screen.SUMMARY -> summary()
+            Screen.MY -> my()
+            Screen.RECAP -> recap()
             else -> Unit
         }
-        findViewById<ScrollView>(R.id.screen_scroll).scrollTo(0, 0)
     }
 
-    private fun navigation() {
-        val nav = findViewById<LinearLayout>(R.id.bottom_navigation); nav.removeAllViews()
-        listOf("여행" to Screen.HOME, "추천" to Screen.RECOMMENDATIONS, "+" to Screen.START, "기록" to Screen.TIMELINE, "MY" to Screen.SUMMARY).forEach { (label, route) -> nav.addView(Button(this).apply {
-            text = label; textSize = if (label == "+") 24f else 12f; isAllCaps = false; minWidth = 0; minimumWidth = 0; setPadding(0, 0, 0, 0)
-            setTextColor(if (screen == route || label == "+") ink else muted)
-            setBackgroundResource(if (label == "+") R.drawable.bg_choice_selected else R.drawable.bg_nav)
-            contentDescription = if (label == "+") "새 여행 또는 기록 시작" else label
-            setOnClickListener { navigate(route) }
-        }, LinearLayout.LayoutParams(0, dp(56), 1f)) }
+    // ── P01 · P02 ───────────────────────────────────────────────────────────
+
+    private fun home() {
+        pageHeader("여행", profile = true)
+        map()
+        tile(tripName(), "${dateLabel(draft.departure)} · 장소 ${itineraryIds.size}곳", trailing = pill(dDay(), pAccent)) { navigate(Screen.ITINERARY) }
+        tile("저장해 둔 릴스에서 다음 여행 찾기", "+ 에서 추천 장소 보기", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
+        tile("이번 여행 기록", "${draft.destination} · 남긴 장소 ${2 + moments.size}곳") { navigate(Screen.TIMELINE) }
+        put(label("지난 여행", 12, pMuted), gap = 8)
+        tile("속초 1박 2일", "10월 · 214 km · 장소 7곳 · 예시") { message("지난 여행 기록은 다음 구현 단계예요.") }
     }
+
+    private class FanItem(val label: String, val description: String, val icon: Int, val go: () -> Unit)
+
+    /** The + menu (P02): five actions fan out in an arc above the button, which turns into a close (×). */
+    private fun fanOut() {
+        val layer = findViewById<FrameLayout>(R.id.fan_layer); layer.removeAllViews()
+        val scrim = findViewById<View>(R.id.sheet_scrim)
+        findViewById<View>(R.id.sheet_overlay).visibility = View.VISIBLE
+        scrim.setBackgroundColor(Color.argb(214, 27, 38, 31)); scrim.setOnClickListener { closeFan() }
+        val animate = shownScreen != Screen.START
+        val items = listOf(
+            FanItem("새 여행", "새 여행 만들기, 목적지부터 5단계", R.drawable.ic_fan_trip) { leaveFanTo(Screen.DESTINATION) },
+            FanItem("추천 장소", "추천 장소 보기", R.drawable.ic_fan_reco) { leaveFanTo(Screen.RECOMMENDATIONS) },
+            FanItem("지금 기록", "지금 이 장소 기록, 현재 위치로 근처 장소 찾기", R.drawable.ic_fan_pin) { leaveFanTo(Screen.TIMELINE); locateHere() },
+            FanItem("기록 보기", "기록 보기", R.drawable.ic_fan_list) { leaveFanTo(Screen.TIMELINE) },
+            FanItem("모아보기", "한눈에 모아보기, 기록을 한 장씩 넘겨 보기", R.drawable.ic_fan_recap) { recapIndex = 0; leaveFanTo(Screen.RECAP) },
+        )
+        val radius = dpf(132f)
+        // Item views sit with their circle centred on the + button (bar 84dp, button 60dp → centre 42dp up).
+        items.forEachIndexed { i, item ->
+            val angle = Math.toRadians(165.0 - i * 150.0 / (items.size - 1))
+            val tx = (cos(angle) * radius).toFloat(); val ty = (-sin(angle) * radius).toFloat()
+            val view = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; tag = "fan"
+                // Label and circle are one target, so tapping the word works too.
+                isClickable = true; isFocusable = true; contentDescription = item.description; setOnClickListener { item.go() }
+                addView(label(item.label, 12, Color.WHITE, bold = true).apply {
+                    gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }, lp(dp(88), WRAP).apply { bottomMargin = dp(6) })
+                addView(ImageButton(this@PhoneActivity, null, 0).apply {
+                    setImageResource(item.icon); imageTintList = ColorStateList.valueOf(pInk); scaleType = ImageView.ScaleType.CENTER
+                    background = oval(pSurface); foreground = ripple(28f); elevation = dpf(3f)
+                    isClickable = false; isFocusable = false; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }, lp(dp(56), dp(56)))
+            }
+            layer.addView(view, FrameLayout.LayoutParams(dp(88), WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(42 - 28) })
+            if (animate) {
+                view.alpha = 0f; view.scaleX = 0.4f; view.scaleY = 0.4f
+                view.animate().translationX(tx).translationY(ty).alpha(1f).scaleX(1f).scaleY(1f)
+                    .setStartDelay(i * 30L).setDuration(280).setInterpolator(OvershootInterpolator(1.3f)).start()
+            } else { view.translationX = tx; view.translationY = ty }
+        }
+        val close = Button(this, null, 0).apply {
+            text = "+"; textSize = 30f; setTextColor(pInk); gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(3))
+            background = oval(pSurface); foreground = ripple(30f); contentDescription = "메뉴 닫기"
+            setOnClickListener { closeFan() }
+        }
+        layer.addView(close, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(12) })
+        if (animate) { scrim.alpha = 0f; scrim.animate().alpha(1f).setDuration(180).start(); close.animate().rotation(45f).setDuration(220).start() }
+        else { scrim.alpha = 1f; close.rotation = 45f }
+    }
+
+    private var fanClosing = false
+
+    /** Folds the items back into the button, then returns to the screen underneath. */
+    private fun closeFan() {
+        if (fanClosing) return
+        fanClosing = true
+        val layer = findViewById<FrameLayout>(R.id.fan_layer)
+        for (i in 0 until layer.childCount) {
+            val child = layer.getChildAt(i)
+            if (child.tag == "fan") child.animate().translationX(0f).translationY(0f).alpha(0f).scaleX(0.4f).scaleY(0.4f).setStartDelay(0).setDuration(160).start()
+            else child.animate().rotation(0f).setDuration(160).start()
+        }
+        findViewById<View>(R.id.sheet_scrim).animate().alpha(0f).setDuration(170).withEndAction { fanClosing = false; onBackPressed() }.start()
+    }
+
+    /** Leaves the fan for [target] without keeping the fan itself in the back stack. */
+    private fun leaveFanTo(target: Screen) {
+        if (screen == Screen.START && history.isNotEmpty()) screen = history.removeAt(history.lastIndex)
+        if (target == screen) render() else navigate(target)
+    }
+
+    // ── P03–P07 · 5-step setup ──────────────────────────────────────────────
 
     private fun destination() {
-        step(1, "목적지·날짜"); text("목적지", 13, muted)
+        wizardHeader(1, "목적지", "어디로 갈까요?")
         val input = EditText(this).apply {
-            setSingleLine(true); setText(draft.destination); hint = "도시 또는 장소"; setTextColor(ink)
-            setPadding(dp(16), dp(12), dp(16), dp(12)); setBackgroundResource(R.drawable.bg_card)
+            setSingleLine(true); setText(draft.destination); hint = "도시 또는 장소"; textSize = 15f; setTextColor(pInk); setHintTextColor(pMuted)
+            background = shape(pSurface, pLine, 12f); setPadding(dp(14), 0, dp(14), 0); minHeight = dp(46)
             addTextChangedListener(SimpleTextWatcher { draft.destination = it })
-        }; add(input)
-        button("출발 · ${draft.departure}", false) { chooseDate(false) }; button("종료 · ${draft.endDate}", false) { chooseDate(true) }
-        add(Switch(this).apply { text = "이동 기록 켜기"; isChecked = draft.recordRoute; setTextColor(ink); minHeight = dp(48); setOnCheckedChangeListener { _, checked -> draft.recordRoute = checked } })
-        text("설정만 저장합니다. 실제 위치 수집은 연결 전이에요.", 12, muted)
-        text("공개 범위", 13, muted); choices(listOf("나만", "가족·친구", "전체"), { it == draft.visibility }) { draft.visibility = it; render() }
-        text("선택은 시연용이며 외부에 게시하지 않습니다.", 12, muted)
-        button("다음") { if (draft.destination.isBlank()) input.error = "목적지를 입력해 주세요" else { draft.destination = draft.destination.trim(); navigate(Screen.COMPANIONS) } }
+        }
+        put(field("목적지", input))
+        val dates = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dates.addView(field("출발", valueBox(dateLabel(draft.departure)) { chooseDate(false) }), lp(0, WRAP, 1f).apply { marginEnd = dp(12) })
+        dates.addView(field("종료", valueBox(dateLabel(draft.endDate), muted = draft.endDate == "미정") { chooseDate(true) }), lp(0, WRAP, 1f))
+        put(dates)
+        val toggle = Switch(this).apply { isChecked = draft.recordRoute; contentDescription = "이동 기록 켜기"; setOnCheckedChangeListener { _, on -> draft.recordRoute = on } }
+        tile("이동 기록 켜기", "여행 중 경로를 자동으로 남겨요", trailing = toggle, gap = 6) { toggle.toggle() }
+        put(label("지금은 설정만 저장해요. 위치는 아직 수집하지 않아요.", 12, pMuted))
+        put(field("공개 범위", segmented(listOf("나만", "가족·친구", "전체"), { it == draft.visibility }) { draft.visibility = it; render() }))
+        primary("다음") {
+            if (draft.destination.isBlank()) input.error = "목적지를 입력해 주세요"
+            else { draft.destination = draft.destination.trim(); navigate(Screen.COMPANIONS) }
+        }
+    }
+
+    private fun companions() {
+        wizardHeader(2, "동승자", "누구와 함께 가나요?", "복수 선택 가능")
+        listOf("부모님" to "편한 이동, 조용한 이야기", "아이와 가족" to "쉬는 곳, 아이가 즐길 곳", "연인" to "분위기 있는 장소", "친구" to "활동적인 장소", "혼자" to "내 속도로")
+            .forEach { (name, hint) ->
+                option(name, hint, name in draft.companions) {
+                    if (name in draft.companions) draft.companions.remove(name)
+                    else { if (name == "혼자") draft.companions.clear() else draft.companions.remove("혼자"); draft.companions.add(name) }
+                    render()
+                }
+            }
+        primary("다음") { if (draft.companions.isEmpty()) message("동승자를 하나 이상 골라 주세요.") else navigate(Screen.INTERESTS) }
+    }
+
+    private fun interests() {
+        wizardHeader(3, "관심사", "무엇에 끌리나요?", "3개까지")
+        put(chipFlow(listOf("지역 이야기", "맛집", "추억", "역사", "자연·바다", "카페", "사진 명소", "전시·문화", "시장", "산책"), { it in draft.interests }) {
+            if (it in draft.interests) draft.interests.remove(it) else if (draft.interests.size < 3) draft.interests.add(it) else message("관심사는 3개까지 고를 수 있어요.")
+            render()
+        })
+        tile("지난 여행의 선택을 기억해 먼저 보여줘요", null, dashed = true, titleSize = 13, titleColor = pMuted, titleBold = false)
+        primary("다음") { if (draft.interests.isEmpty()) message("관심사를 하나 이상 골라 주세요.") else navigate(Screen.MOOD) }
+    }
+
+    private fun mood() {
+        wizardHeader(4, "분위기", "어떤 분위기가 좋아요?")
+        listOf("잔잔한" to "여유 있게, 이야기는 길게", "활기찬" to "가볍고 빠르게", "감성적인" to "추억과 음악 위주")
+            .forEach { (name, hint) -> option(name, hint, name == draft.mood) { draft.mood = name; render() } }
+        put(field("일정 밀도", segmented(listOf("느긋", "보통", "알차게"), { it == draft.density }) { draft.density = it; render() }), gap = 6)
+        put(label("밀도에 따라 하루 장소 수와 머무는 시간이 달라져요.", 12, pMuted))
+        primary("다음") { navigate(Screen.IMPORT) }
+    }
+
+    private fun importVideos() {
+        wizardHeader(5, "가져오기", "저장해 둔 영상에서 찾아볼까요?", "건너뛰어도 일정은 만들어져요")
+        listOf(
+            Triple("유튜브 연결", "좋아요·재생목록의 쇼츠", "연동 예정"),
+            Triple("공유로 보내기", "릴스·쇼츠 공유 → 차곡", "연동 예정"),
+            Triple("인스타 내려받기 파일", "저장함·좋아요·보낸 릴스", "파일 · 예정"),
+            Triple("유튜브 시청 기록", "구글 내보내기 파일로만", "파일 · 예정"),
+        ).forEach { (name, hint, status) -> tile(name, hint, icon = true, trailing = pill(status, pMuted), gap = 10) { integration(repository.importFrom(name)) } }
+        tile("인스타 계정 연결", "공식 경로 없음", icon = true, trailing = pill("준비 중", pMuted)).alpha = 0.5f
+        primary("장소 찾기") { navigate(Screen.RECOMMENDATIONS) }
+        textButton("건너뛰기", into = actions) { navigate(Screen.ITINERARY) }
+    }
+
+    // ── P08 · P09 ───────────────────────────────────────────────────────────
+
+    private fun recommendations() {
+        pageHeader("추천", sub = "영상에서 찾은 장소 · 샘플")
+        put(segmented(listOf("전체", "저장", "좋아요", "보낸"), { it == filter }) { filter = it; render() })
+        repository.places.filter { filter == "전체" || it.group == filter }.forEach { place ->
+            val far = place.id in farFromRoute
+            option(place.name, "${place.source}\n${place.reason}", place.id in selectedPlaces, icon = false) {
+                if (!selectedPlaces.add(place.id)) selectedPlaces.remove(place.id); render()
+            }.alpha = if (far) 0.55f else 1f
+        }
+        primary("${selectedPlaces.size}곳을 일정에 담기") {
+            if (selectedPlaces.isEmpty()) message("장소를 하나 이상 골라 주세요.")
+            else { itineraryIds.clear(); itineraryIds.addAll(selectedPlaces); navigate(Screen.ITINERARY) }
+        }
     }
 
     private fun itinerary() {
-        text("${draft.destination} · ${draft.departure}", 15, muted); map()
-        itineraryPlaces().forEachIndexed { index, place ->
-            card("${index + 1}. ${place.name}", "예시 ${place.time} · ${place.duration}\n길게 누르면 순서 편집") { message("장소 메모 편집은 다음 구현 단계예요.") }.setOnLongClickListener {
-                AlertDialog.Builder(this).setTitle(place.name).setItems(arrayOf("위로 이동", "아래로 이동")) { _, action ->
-                    val destination = if (action == 0) index - 1 else index + 1
-                    if (destination in itineraryIds.indices) { val id = itineraryIds.removeAt(index); itineraryIds.add(destination, id); render() }
-                }.show(); true
+        pageHeader("${draft.destination} 일정", trailing = dateLabel(draft.departure))
+        map()
+        val places = itineraryPlaces()
+        if (places.isEmpty()) put(label("담은 장소가 없어요. 추천에서 골라 주세요.", 14, pMuted))
+        places.forEachIndexed { index, place ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(56)
+                setPadding(dp(12), dp(10), dp(14), dp(10)); background = shape(pSurface, pLine, 14f)
+                isClickable = true; isLongClickable = true; foreground = ripple(14f)
+                contentDescription = "${index + 1}번째 ${place.name}, ${place.time}, ${place.duration}. 길게 눌러 순서 바꾸기"
+                setOnClickListener { message("길게 누르면 순서를 바꿀 수 있어요.") }
+                setOnLongClickListener { reorder(index, place); true }
             }
+            row.addView(label("⋮⋮", 16, pMuted), lp(dp(22), WRAP))
+            row.addView(label(place.time, 13, pMuted), lp(dp(50), WRAP))
+            row.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(label(place.name, 15, pInk, bold = true)); addView(label(place.duration, 12, pMuted))
+            }, lp(0, WRAP, 1f))
+            put(row, gap = 8)
         }
-        button("사이에 들를 곳 더 찾기", false) { navigate(Screen.RECOMMENDATIONS) }
-        button("차로 보내기 · 데모") { integration(repository.stageTrip(draft, itineraryPlaces())) }
+        space(6)
+        tile("사이에 들를 곳 더 찾기", "동선 근처 장소를 제안해요", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
+        primary("차로 보내기") {
+            if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else integration(repository.stageTrip(draft, places))
+        }
+    }
+
+    private fun reorder(index: Int, place: Place) {
+        AlertDialog.Builder(this).setTitle(place.name).setItems(arrayOf("위로 이동", "아래로 이동")) { _, action ->
+            val target = if (action == 0) index - 1 else index + 1
+            if (target in itineraryIds.indices) { val id = itineraryIds.removeAt(index); itineraryIds.add(target, id); render() }
+        }.show()
+    }
+
+    // ── P10–P13 · record ────────────────────────────────────────────────────
+
+    private fun arrival() {
+        put(backButton(), gap = 12)
+        put(label("12:34", 56, pInk).apply { gravity = Gravity.CENTER; typeface = Typeface.create("sans-serif-light", Typeface.NORMAL) }, gap = 0)
+        put(label(fullDateLabel(draft.departure), 14, pMuted).apply { gravity = Gravity.CENTER }, gap = 36)
+        val note = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(14), dp(16), dp(14)); background = shape(pSurface, pLine, 18f)
+        }
+        note.addView(label("차곡 · 지금", 12, pMuted))
+        note.addView(label("초당 순두부 거리에 도착했어요", 15, pInk, bold = true).apply { setPadding(0, dp(6), 0, dp(2)) })
+        note.addView(label("이 장소의 사진 한 장을 남길까요?", 13, pMuted))
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(12), 0, 0) }
+        buttons.addView(actionButton("나중에", primary = false) { navigate(Screen.TIMELINE) }, lp(0, dp(44), 1f).apply { marginEnd = dp(8) })
+        buttons.addView(actionButton("사진 남기기", primary = true) { navigate(Screen.PHOTOS) }, lp(0, dp(44), 1f))
+        note.addView(buttons)
+        put(note, gap = 10)
+        tile("안목 커피거리 기록 완료", "사진 3장 · 메모 1", eyebrow = "차곡 · 1시간 전").alpha = 0.6f
+        put(label("도착 알림 예시예요. 실제 위치 감지와 시스템 알림은 연결 전이에요.", 12, pMuted).apply { gravity = Gravity.CENTER })
     }
 
     private fun photos() {
-        text("초당 순두부 거리", 18)
-        choices(listOf("제안", "내 앨범", "촬영"), { it == photoTab }) { photoTab = it; render() }
-        if (photoTab != "제안") { text("${photoTab} 연동 전입니다. 기기의 사진·카메라에 접근하지 않아요.", 14, muted); return }
-        text("샘플 조건 · 200m 안 · 12:20–13:40\n실제 사진·EXIF를 읽지 않습니다.", 12, muted)
-        choices((1..6).map { "예시 사진 $it" }, { it.last().digitToInt() in selectedPhotos }) {
-            val number = it.last().digitToInt(); if (!selectedPhotos.add(number)) selectedPhotos.remove(number); render()
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        top.addView(backButton(), lp(dp(72), dp(44)))
+        top.addView(label("초당 순두부 거리", 17, pInk, bold = true).apply { gravity = Gravity.CENTER }, lp(0, WRAP, 1f))
+        top.addView(View(this), lp(dp(72), dp(44)))
+        put(top, gap = 10)
+        put(segmented(listOf("제안", "내 앨범", "촬영"), { it == photoTab }, display = { if (it == "제안") "제안 6" else it }) { photoTab = it; render() })
+        if (photoTab != "제안") { put(label("$photoTab 연동 전이에요. 기기의 사진·카메라에 접근하지 않아요.", 14, pMuted)); return }
+        put(label("이 장소 200m 안에서 12:20~13:40에 찍은 사진", 13, pInk), gap = 10)
+        (1..6).chunked(3).forEach { rowNumbers ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            rowNumbers.forEach { n -> row.addView(photoTile(n), lp(0, dp(108), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }) }
+            put(row, gap = 0)
         }
-        button("${selectedPhotos.size}장 담기 · 예시") { if (selectedPhotos.isEmpty()) message("샘플 사진을 하나 이상 골라 주세요.") else { recordedPhotos.addAll(selectedPhotos); navigate(Screen.TIMELINE) } }
+        space(8)
+        put(label("위치 정보가 없으면 시각으로만 비교해요. 고른 사진만 올라가요.\n지금은 예시 사진이에요. 앨범에 접근하지 않아요.", 12, pMuted))
+        primary("${selectedPhotos.size}장 담기") {
+            if (selectedPhotos.isEmpty()) message("사진을 하나 이상 골라 주세요.") else { recordedPhotos.addAll(selectedPhotos); navigate(Screen.TIMELINE) }
+        }
     }
 
-    private fun step(n: Int, label: String) { text("$n / 5  ·  $label", 13, muted) }
-    private fun map() { layoutInflater.inflate(R.layout.panel_map, content, true) }
+    private fun photoTile(n: Int): View {
+        val selected = n in selectedPhotos
+        return FrameLayout(this).apply {
+            background = shape(pFill, if (selected) pAccent else null, 10f, strokeDp = 2.5f)
+            isClickable = true; foreground = ripple(10f); isSelected = selected
+            contentDescription = "예시 사진 $n, ${if (selected) "선택됨" else "선택 안 됨"}"
+            setOnClickListener { if (!selectedPhotos.add(n)) selectedPhotos.remove(n); render() }
+            addView(label("예시 $n", 11, pMuted), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { setMargins(dp(8), 0, 0, dp(6)) })
+            if (selected) addView(checkMark(), FrameLayout.LayoutParams(dp(22), dp(22), Gravity.TOP or Gravity.END).apply { setMargins(0, dp(6), dp(6), 0) })
+        }
+    }
+
+    private fun timeline() {
+        pageHeader("기록", sub = "${draft.destination} · ${dateLabel(draft.departure)}")
+        map()
+        driveRecord()
+        put(label("방문 기록", 12, pMuted), gap = 8)
+        tile("안목 커피거리", "10:32 · 사진 3 · 메모 1 · 예시", gap = 10) { navigate(Screen.PHOTOS) }
+        tile("초당 순두부 거리", "12:34 · 사진 ${recordedPhotos.size} · 예시", gap = 10) { navigate(Screen.PHOTOS) }
+        moments.forEach { m -> val (name, detail) = m.split('\u0001', limit = 2).let { it[0] to it.getOrElse(1) { "" } }; tile(name, detail, trailing = pill("내 기록", pAccent), gap = 10) }
+        hereSuggestion()
+        textButton("여행 요약 보기 ›") { navigate(Screen.SUMMARY) }
+        textButton("도착 알림 예시 보기 ›") { navigate(Screen.ARRIVAL) }
+    }
+
+    /** P12 suggestion from the phone's current location: nearest known place within 1.5 km, else the address. */
+    private fun hereSuggestion() {
+        val small = { b: Button -> b.apply { textSize = 13f; setPadding(dp(12), 0, dp(12), 0) } }
+        val found = nearby
+        when {
+            locating -> tile("현재 위치를 찾는 중…", "잠시만 기다려 주세요", dashed = true)
+            found != null -> tile(found.first, found.second, eyebrow = "지금 여기 · 위치 기반 추천", dashed = true,
+                trailing = small(actionButton("기록으로 추가", primary = false) {
+                    moments.add("${found.first}\u0001${LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))} · 현재 위치에서 기록")
+                    nearby = null; render()
+                }))
+            else -> tile("지금 있는 곳을 기록할까요?", "현재 위치로 근처 장소를 찾아 드려요", dashed = true,
+                trailing = small(actionButton("위치 찾기", primary = false) { locateHere() }))
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun locateHere() {
+        val granted = listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            .any { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        if (!granted) {
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), REQUEST_LOCATION); return
+        }
+        val manager = getSystemService(LocationManager::class.java)
+        val provider = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).firstOrNull { manager.isProviderEnabled(it) }
+            ?: run { message("휴대폰의 위치 서비스를 켜 주세요."); return }
+        locating = true; render()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            manager.getCurrentLocation(provider, null, mainExecutor) { onLocated(it ?: manager.getLastKnownLocation(provider)) }
+        } else {
+            @Suppress("DEPRECATION")
+            manager.requestSingleUpdate(provider, object : LocationListener {
+                override fun onLocationChanged(location: Location) = onLocated(location)
+                @Deprecated("Deprecated in Java") override fun onStatusChanged(p: String?, s: Int, e: Bundle?) = Unit
+                override fun onProviderEnabled(p: String) = Unit
+                override fun onProviderDisabled(p: String) = Unit
+            }, mainLooper)
+        }
+    }
+
+    private fun onLocated(location: Location?) {
+        if (location == null) { locating = false; nearby = null; message("현재 위치를 찾지 못했어요."); render(); return }
+        val candidates = repository.places + repository.radioPlace
+        val closest = sampleCoords.mapNotNull { (id, ll) ->
+            val place = candidates.find { it.id == id } ?: return@mapNotNull null
+            val out = FloatArray(1); Location.distanceBetween(location.latitude, location.longitude, ll.first, ll.second, out); place to out[0]
+        }.minByOrNull { it.second }
+        if (closest != null && closest.second < 1500f) {
+            locating = false; nearby = closest.first.name to "지금 위치에서 ${distanceLabel(closest.second)} · 여기 들렀나요?"; render(); return
+        }
+        // No known place nearby: name the spot from the address (Geocoder may block, so off the main thread).
+        Thread {
+            val address = runCatching {
+                @Suppress("DEPRECATION")
+                if (Geocoder.isPresent()) Geocoder(this, Locale.KOREAN).getFromLocation(location.latitude, location.longitude, 1)?.firstOrNull() else null
+            }.getOrNull()
+            val name = address?.let { listOfNotNull(it.locality ?: it.adminArea, it.subLocality ?: it.thoroughfare).distinct().joinToString(" ") }
+                ?.takeIf { it.isNotBlank() } ?: "새로 들른 곳"
+            val coords = String.format(Locale.US, "%.4f, %.4f", location.latitude, location.longitude)
+            runOnUiThread { locating = false; nearby = name to "$coords · 근처에 아는 장소가 없어요"; render() }
+        }.start()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, results)
+        if (requestCode != REQUEST_LOCATION) return
+        if (results.any { it == PackageManager.PERMISSION_GRANTED }) locateHere() else message("위치 권한이 있어야 지금 있는 곳을 추천할 수 있어요.")
+    }
+
+    private fun distanceLabel(meters: Float) = if (meters < 1000) "${meters.toInt()}m" else String.format(Locale.US, "%.1fkm", meters / 1000)
+
+    /** P12 section built from DriveEvents: one card per place, labelled by the latest decision made in the car. */
+    private fun driveRecord() {
+        if (driveEvents.isEmpty()) { put(label("차에서 저장하거나 들른 장소가 여기에 모여요.", 13, pMuted)); return }
+        val finished = driveEvents.any { it.type == DriveEvent.Type.TRIP_FINISHED }
+        val started = driveEvents.any { it.type == DriveEvent.Type.TRIP_STARTED }
+        put(label("차에서 남긴 기록 · ${if (finished) "주행 끝" else if (started) "주행 중" else "출발 전"}", 12, pMuted), gap = 8)
+        driveEvents.filter { it.placeId != null }.groupBy { it.placeId!! }.forEach { (placeId, events) ->
+            val (badge, body) = when (events.last().type) {
+                DriveEvent.Type.WAYPOINT_APPROVED -> "경유지" to "들렀다 가기로 한 곳"
+                DriveEvent.Type.WAYPOINT_DECLINED -> "다음에" to "다음 여행 후보로 남겨 둔 곳"
+                else -> "저장" to "주행 중에 기억해 둔 곳"
+            }
+            tile(placeName(placeId), "${clock(events.first().at)} · $body", trailing = pill(badge, if (badge == "경유지") pAccent else pMuted), gap = 10)
+        }
+        space(4)
+    }
+
+    private fun summary() {
+        pageHeader("여행 요약", sub = "${draft.destination} ${tripLength()}")
+        val approved = driveEvents.filter { it.type == DriveEvent.Type.WAYPOINT_APPROVED }.mapNotNull { it.placeId }.filter { it !in itineraryIds }.distinct()
+        val stats = listOf("214km" to "이동 거리", "${itineraryIds.size + approved.size}곳" to "들른 장소", "${3 + recordedPhotos.size}장" to "사진", "2개" to "들은 이야기")
+        stats.chunked(2).forEach { pair ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            pair.forEachIndexed { i, (value, name) ->
+                row.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(14)); background = shape(pSurface, pLine, 14f)
+                    addView(label(value, 22, pInk, bold = true)); addView(label(name, 12, pMuted))
+                }, lp(0, WRAP, 1f).apply { if (i == 0) marginEnd = dp(10) })
+            }
+            put(row, gap = 10)
+        }
+        put(label("이동 거리와 들은 이야기 수는 예시예요.", 12, pMuted))
+        tile("여행 영상", "한 번에 짧은 영상으로", icon = true, gap = 10) { message("영상 생성은 다음 구현 단계예요.") }
+        tile("여행 책자", "경로 + 사진 + 메모, 사진 5장부터", icon = true, gap = 10) {
+            message(if (3 + recordedPhotos.size < 5) "사진을 5장 이상 담아 주세요." else "책자 생성은 다음 구현 단계예요.")
+        }
+        tile("공개 범위", null, trailing = label(visibilityLabel(), 13, pMuted)) { navigate(Screen.DESTINATION) }
+        textButton("공유", center = true) { message("공유 기능은 연결 전이에요. 기기 밖으로 보내지 않아요.") }
+    }
+
+    // ── P14 MY · P15 recap ──────────────────────────────────────────────────
+
+    private fun my() {
+        pageHeader("MY")
+        val profile = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        profile.addView(label("나", 22, pInk, bold = true).apply { gravity = Gravity.CENTER; background = oval(pFill) }, lp(dp(64), dp(64)).apply { marginEnd = dp(14) })
+        profile.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label("나", 20, pInk, bold = true)); addView(label("차곡과 함께한 여행 2번 · 예시", 13, pMuted))
+        }, lp(0, WRAP, 1f))
+        put(profile, gap = 20)
+        put(label("이번 여행", 12, pMuted), gap = 8)
+        tile("${draft.destination} 여행 요약", "이동 거리 · 들른 장소 · 사진", gap = 8) { navigate(Screen.SUMMARY) }
+        tile("한눈에 모아보기", "남긴 기록을 한 장씩 넘겨 보기", gap = 20) { recapIndex = 0; navigate(Screen.RECAP) }
+        put(label("지난 여행", 12, pMuted), gap = 8)
+        tile("속초 1박 2일", "10월 · 214 km · 장소 7곳 · 예시", gap = 20) { message("지난 여행 기록은 다음 구현 단계예요.") }
+        put(label("설정", 12, pMuted), gap = 8)
+        tile("기본 공개 범위", null, trailing = label(visibilityLabel(), 13, pMuted), gap = 8) { navigate(Screen.DESTINATION) }
+        val located = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        tile("위치 사용", "'지금 이 장소 기록'을 누를 때만 써요", trailing = pill(if (located) "허용됨" else "꺼짐", if (located) pAccent else pMuted), gap = 8)
+        tile("차량 연결", "Pleos 차량 앱과 여행 주고받기", trailing = pill("연동 전", pMuted), gap = 8)
+        tile("유튜브 연결", "저장한 쇼츠에서 장소 찾기", trailing = pill("연동 예정", pMuted))
+    }
+
+    private class Slide(val dark: Boolean, val kicker: String, val big: String, val caption: String, val items: List<String> = emptyList())
+
+    /** Story-style recap of everything recorded, one card at a time (tap right = next, left = back). */
+    private fun recapSlides(): List<Slide> {
+        val itinerary = itineraryPlaces().map { it.name }
+        val inCar = driveEvents.filter { it.type == DriveEvent.Type.PLACE_SAVED || it.type == DriveEvent.Type.WAYPOINT_APPROVED }
+            .mapNotNull { it.placeId }.distinct().map(::placeName)
+        val mine = moments.map { it.substringBefore('\u0001') }
+        val visited = (itinerary + inCar + mine).distinct()
+        val photos = 3 + recordedPhotos.size
+        val who = draft.companions.firstOrNull() ?: "혼자"
+        return listOf(
+            Slide(true, "차곡 · ${draft.departure.take(4)}", "이번 여행을\n한눈에", "화면 오른쪽을 누르면 다음 장으로 넘어가요"),
+            Slide(false, "함께 달린 거리", "214km", "${draft.destination} ${tripLength()} 여행 · 거리는 예시예요"),
+            Slide(true, "들른 장소", "${visited.size}곳", "일정·차·직접 남긴 기록을 모았어요", visited.take(5)),
+            Slide(false, "차에서 기억해 둔 곳", if (inCar.isEmpty()) "아직 없어요" else "${inCar.size}곳",
+                if (inCar.isEmpty()) "주행 중 '이 장소 기억해 줘'라고 하면 여기에 모여요" else "주행 중에 저장하거나 들르기로 한 곳", inCar.take(5)),
+            Slide(true, "남긴 순간", "${photos}장", "사진 ${photos}장 · 직접 남긴 기록 ${mine.size}곳"),
+            Slide(false, "이번 여행의 취향", "${draft.mood}\n여행자", "$who${withParticle(who).takeIf { who != "혼자" } ?: ""} 함께 · ${draft.density} 일정", draft.interests.toList()),
+            Slide(true, "다음 여행도 차곡", "또 어디로\n갈까요?", "기록은 이 휴대폰에만 있어요. 공유는 연동 예정이에요."),
+        )
+    }
+
+    private fun recap() {
+        val slides = recapSlides()
+        recapIndex = recapIndex.coerceIn(0, slides.lastIndex)
+        val slide = slides[recapIndex]
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val bars = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; contentDescription = "${slides.size}장 중 ${recapIndex + 1}번째" }
+        slides.indices.forEach { i -> bars.addView(View(this).apply { background = shape(if (i <= recapIndex) pInk else pLine, null, 2f) }, lp(0, dp(4), 1f).apply { if (i < slides.lastIndex) marginEnd = dp(4) }) }
+        top.addView(backButton(), lp(WRAP, dp(44)).apply { marginEnd = dp(10) })
+        top.addView(bars, lp(0, WRAP, 1f))
+        put(top, gap = 10)
+
+        val fg = if (slide.dark) Color.WHITE else pInk
+        val card = FrameLayout(this).apply { background = shape(if (slide.dark) pAccent else pAccentSoft, null, 24f) }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(28), dp(36), dp(28), dp(28)) }
+        body.addView(label(slide.kicker, 15, fg, bold = true), lp(MATCH, WRAP).apply { bottomMargin = dp(18) })
+        body.addView(label(slide.big, 44, fg, bold = true).apply { setLineSpacing(0f, 1.05f) }, lp(MATCH, WRAP).apply { bottomMargin = dp(16) })
+        body.addView(label(slide.caption, 15, fg), lp(MATCH, WRAP).apply { bottomMargin = dp(20) })
+        slide.items.forEachIndexed { i, item -> body.addView(label("${i + 1}   $item", 18, fg, bold = i == 0), lp(MATCH, WRAP).apply { bottomMargin = dp(10) }) }
+        card.addView(body, FrameLayout.LayoutParams(MATCH, MATCH))
+        // Tap zones over the card: left third goes back, the rest goes forward.
+        val zones = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        zones.addView(View(this).apply { contentDescription = "이전 장"; isClickable = true; setOnClickListener { if (recapIndex > 0) { recapIndex--; render() } } }, lp(0, MATCH, 1f))
+        zones.addView(View(this).apply { contentDescription = "다음 장"; isClickable = true; setOnClickListener { if (recapIndex < slides.lastIndex) { recapIndex++; render() } } }, lp(0, MATCH, 2f))
+        card.addView(zones, FrameLayout.LayoutParams(MATCH, MATCH))
+        content.addView(card, lp(MATCH, resources.displayMetrics.heightPixels - dp(if (recapIndex == slides.lastIndex) 300 else 210)))
+
+        if (recapIndex == slides.lastIndex) {
+            primary("새 여행 만들기") { navigate(Screen.DESTINATION) }
+            textButton("처음부터 다시 보기", center = true, into = actions) { recapIndex = 0; render() }
+        }
+    }
+
+    // ── chrome ──────────────────────────────────────────────────────────────
+
+    /** The only persistent control: one + button that opens the start sheet (P02). */
+    private fun plusBar() {
+        val bar = findViewById<LinearLayout>(R.id.bottom_navigation); bar.removeAllViews()
+        bar.visibility = if (screen in plusScreens) View.VISIBLE else View.GONE
+        bar.addView(Button(this, null, 0).apply {
+            text = "+"; textSize = 30f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(3))
+            background = oval(pInk); foreground = ripple(30f); elevation = dpf(4f)
+            contentDescription = "무엇을 할까요? 새 여행, 추천, 기록, 모아보기"
+            setOnClickListener { if (screen == Screen.START) onBackPressed() else navigate(Screen.START) }
+        }, lp(dp(60), dp(60)))
+    }
+
+    private fun pageHeader(title: String, trailing: String? = null, sub: String? = null, profile: Boolean = false) {
+        if (screen != Screen.HOME) put(backButton(), gap = 2)
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, 0) }
+        row.addView(label(title, 26, pInk, bold = true), lp(0, WRAP, 1f))
+        trailing?.let { row.addView(label(it, 13, pMuted)) }
+        if (profile) row.addView(Button(this, null, 0).apply {
+            text = "MY"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(pInk); gravity = Gravity.CENTER
+            background = oval(pFill); foreground = ripple(22f); contentDescription = "MY · 내 정보"
+            setOnClickListener { navigate(Screen.MY) }
+        }, lp(dp(44), dp(44)).apply { marginStart = dp(10) })
+        put(row, gap = if (sub == null) 14 else 2)
+        sub?.let { put(label(it, 13, pMuted)) }
+    }
+
+    private fun wizardHeader(step: Int, name: String, title: String, sub: String? = null) {
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        top.addView(backButton(), lp(WRAP, dp(44)))
+        top.addView(View(this), lp(0, 1, 1f))
+        top.addView(label("$step/5 · $name", 13, pMuted))
+        put(top, gap = 6)
+        val bars = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; contentDescription = "5단계 중 ${step}단계" }
+        (1..5).forEach { i -> bars.addView(View(this).apply { background = shape(if (i <= step) pAccent else pLine, null, 2f) }, lp(0, dp(4), 1f).apply { if (i < 5) marginEnd = dp(5) }) }
+        put(bars, gap = 18)
+        put(label(title, 24, pInk, bold = true), gap = if (sub == null) 16 else 4)
+        sub?.let { put(label(it, 13, pMuted), gap = 16) }
+    }
+
+    private fun map() { put(layoutInflater.inflate(R.layout.panel_map, content, false)) }
+
+    // ── components ──────────────────────────────────────────────────────────
+
+    /** Card row from the wireframe: optional icon square, title + sub, trailing view; dashed = suggestion. */
+    private fun tile(
+        title: String, sub: String? = null, eyebrow: String? = null, trailing: View? = null, icon: Boolean = false,
+        dashed: Boolean = false, selected: Boolean? = null, gap: Int = 14, into: LinearLayout = content,
+        titleSize: Int = 15, titleColor: Int = pInk, titleBold: Boolean = true, onClick: (() -> Unit)? = null,
+    ): LinearLayout {
+        val on = selected == true
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(48)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = shape(if (on) pAccentSoft else pSurface, if (on) pAccent else if (dashed) pMuted else pLine, 14f, dashed)
+            if (onClick != null) { isClickable = true; isFocusable = true; foreground = ripple(14f); setOnClickListener { onClick() } }
+            if (selected != null) { isSelected = on; contentDescription = listOfNotNull(title, sub, if (on) "선택됨" else "선택 안 됨").joinToString(", ") }
+        }
+        if (icon) row.addView(View(this).apply { background = shape(pFill, null, 10f) }, lp(dp(34), dp(34)).apply { marginEnd = dp(12) })
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        eyebrow?.let { texts.addView(label(it, 11, pMuted)) }
+        texts.addView(label(title, titleSize, titleColor, bold = titleBold))
+        sub?.let { texts.addView(label(it, 12, pMuted).apply { setPadding(0, dp(2), 0, 0) }) }
+        row.addView(texts, lp(0, WRAP, 1f))
+        if (on) row.addView(checkMark(), lp(dp(22), dp(22)).apply { marginStart = dp(10) })
+        trailing?.let { row.addView(it, lp(WRAP, WRAP).apply { marginStart = dp(10) }) }
+        put(row, gap, into)
+        return row
+    }
+
+    private fun option(title: String, sub: String, selected: Boolean, icon: Boolean = true, onClick: () -> Unit) =
+        tile(title, sub, icon = icon, selected = selected, gap = 10, onClick = onClick)
+
+    private fun segmented(labels: List<String>, selected: (String) -> Boolean, display: (String) -> String = { it }, onClick: (String) -> Unit): View {
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(4), dp(4), dp(4), dp(4)); background = shape(pSurface, pLine, 12f) }
+        labels.forEach { value ->
+            val on = selected(value)
+            bar.addView(Button(this, null, 0).apply {
+                text = display(value); textSize = 13f; gravity = Gravity.CENTER; isSelected = on
+                setTextColor(if (on) Color.WHITE else pMuted); typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                background = if (on) shape(pInk, null, 9f) else null; foreground = ripple(9f)
+                contentDescription = "${display(value)}${if (on) ", 선택됨" else ""}"
+                setOnClickListener { onClick(value) }
+            }, lp(0, dp(40), 1f))
+        }
+        return bar
+    }
+
+    private fun chipFlow(labels: List<String>, selected: (String) -> Boolean, onClick: (String) -> Unit): View {
+        val flow = FlowLayout(this, dp(6))
+        labels.forEach { value ->
+            val on = selected(value)
+            flow.addView(Button(this, null, 0).apply {
+                text = value; textSize = 14f; gravity = Gravity.CENTER; minHeight = dp(40); setPadding(dp(14), 0, dp(14), 0)
+                setTextColor(if (on) pInk else pMuted); background = shape(if (on) pAccentSoft else pSurface, if (on) pAccent else pLine, 999f)
+                foreground = ripple(999f); isSelected = on; contentDescription = "$value${if (on) ", 선택됨" else ""}"
+                setOnClickListener { onClick(value) }
+            }, ViewGroup.LayoutParams(WRAP, WRAP))
+        }
+        return flow
+    }
+
+    private fun field(name: String, view: View) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(label(name, 12, pMuted), lp(WRAP, WRAP).apply { bottomMargin = dp(5) })
+        addView(view, lp(MATCH, WRAP))
+    }
+
+    private fun valueBox(value: String, muted: Boolean = false, onClick: () -> Unit) = Button(this, null, 0).apply {
+        text = value; textSize = 15f; setTextColor(if (muted) pMuted else pInk); gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        minHeight = dp(46); setPadding(dp(14), 0, dp(14), 0); background = shape(pSurface, pLine, 12f); foreground = ripple(12f)
+        setOnClickListener { onClick() }
+    }
+
+    private fun primary(text: String, onClick: () -> Unit) {
+        actions.visibility = View.VISIBLE
+        actions.addView(actionButton(text, primary = true, onClick = onClick), lp(MATCH, dp(50)))
+    }
+
+    private fun actionButton(text: String, primary: Boolean, onClick: () -> Unit) = Button(this, null, 0).apply {
+        this.text = text; textSize = 16f; gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD
+        setTextColor(if (primary) Color.WHITE else pInk)
+        background = if (primary) shape(pInk, null, 14f) else shape(pSurface, pInk, 14f); foreground = ripple(14f)
+        setOnClickListener { onClick() }
+    }
+
+    /** Top-left back control shown on every screen except home; with no history it returns home. */
+    private fun backButton() = Button(this, null, 0).apply {
+        text = "‹ 이전"; textSize = 15f; setTextColor(pInk); minHeight = dp(44); minWidth = dp(64)
+        gravity = Gravity.CENTER_VERTICAL or Gravity.START; setPadding(dp(2), 0, dp(8), 0); foreground = ripple(8f)
+        contentDescription = "이전 화면으로"
+        setOnClickListener { goBack() }
+    }
+
+    private fun goBack() {
+        if (history.isNotEmpty()) onBackPressed() else { screen = Screen.HOME; render() }
+    }
+
+    /** Quiet text action. attach = false when the caller places it itself (header rows). */
+    private fun textButton(text: String, center: Boolean = false, attach: Boolean = true, into: LinearLayout = content, onClick: () -> Unit): Button {
+        val button = Button(this, null, 0).apply {
+            this.text = text; textSize = 13f; setTextColor(pMuted); minHeight = dp(44); setPadding(dp(4), 0, dp(4), 0)
+            gravity = if (center) Gravity.CENTER else Gravity.CENTER_VERTICAL or Gravity.START; foreground = ripple(8f)
+            setOnClickListener { onClick() }
+        }
+        if (attach) put(button, gap = 0, into = into)
+        return button
+    }
+
+    private fun label(value: String, size: Int, color: Int, bold: Boolean = false) = TextView(this).apply {
+        text = value; textSize = size.toFloat(); setTextColor(color); setLineSpacing(dp(2).toFloat(), 1f)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun pill(value: String, color: Int) = label(value, 12, color).apply {
+        setPadding(dp(9), dp(3), dp(9), dp(3)); background = shape(Color.TRANSPARENT, color, 999f, strokeDp = 1f)
+    }
+
+    private fun checkMark() = label("✓", 13, Color.WHITE).apply { gravity = Gravity.CENTER; background = oval(pAccent); importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+
+    /** Fixed vertical gap. A bare View with WRAP_CONTENT would swallow the remaining height of the filled viewport. */
+    private fun space(height: Int) { content.addView(View(this), lp(MATCH, dp(height))) }
+
+    private fun put(view: View, gap: Int = 14, into: LinearLayout = content) { into.addView(view, lp(MATCH, WRAP).apply { bottomMargin = dp(gap) }) }
+
+    // ── drawing ─────────────────────────────────────────────────────────────
+
+    private fun shape(fill: Int, stroke: Int?, radius: Float, dashed: Boolean = false, strokeDp: Float = 1.5f) = GradientDrawable().apply {
+        setColor(fill); cornerRadius = dpf(radius)
+        if (stroke != null) { val w = dpf(strokeDp).toInt().coerceAtLeast(1); if (dashed) setStroke(w, stroke, dpf(6f), dpf(4f)) else setStroke(w, stroke) }
+    }
+    private fun oval(fill: Int) = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(fill) }
+    private fun ripple(radius: Float) = RippleDrawable(ColorStateList.valueOf(Color.argb(28, 0, 0, 0)), null, shape(Color.BLACK, null, radius))
+    private fun dpf(value: Float) = value * resources.displayMetrics.density
+    private fun lp(w: Int, h: Int, weight: Float = 0f) = LinearLayout.LayoutParams(w, h, weight)
+
+    // ── labels ──────────────────────────────────────────────────────────────
+
+    private fun tripName(): String {
+        val who = draft.companions.firstOrNull()
+        return if (who == null || who == "혼자") "혼자 ${draft.destination} 드라이브" else "$who${withParticle(who)} ${draft.destination} 드라이브"
+    }
+    /** 와/과 by the last syllable's final consonant. */
+    private fun withParticle(word: String): String {
+        val c = word.lastOrNull() ?: return "와"
+        return if (c in '가'..'힣' && (c - '가') % 28 != 0) "과" else "와"
+    }
+    private fun date(value: String) = runCatching { LocalDate.parse(value) }.getOrNull()
+    private fun dateLabel(value: String) = date(value)?.let { "${it.monthValue}월 ${it.dayOfMonth}일" } ?: value
+    private fun fullDateLabel(value: String) = date(value)?.let { "${dateLabel(value)} ${it.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.KOREAN)}" } ?: value
+    private fun dDay(): String {
+        val days = date(draft.departure)?.let { ChronoUnit.DAYS.between(LocalDate.now(), it) } ?: return "D-?"
+        return when { days > 0 -> "D-$days"; days == 0L -> "D-DAY"; else -> "D+${-days}" }
+    }
+    private fun tripLength(): String {
+        val start = date(draft.departure); val end = date(draft.endDate)
+        if (start == null || end == null || !end.isAfter(start)) return "당일"
+        val nights = ChronoUnit.DAYS.between(start, end)
+        return "${nights}박 ${nights + 1}일"
+    }
+    private fun visibilityLabel() = when (draft.visibility) { "나만" -> "나만 보기"; "가족·친구" -> "가족·친구에게"; else -> "전체 공개" }
+    private fun placeName(id: String) = (repository.places + repository.radioPlace).find { it.id == id }?.name ?: id
+    private fun clock(at: String) = runCatching {
+        Instant.parse(at).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
+    }.getOrDefault(at)
+
     private fun chooseDate(end: Boolean) {
-        val start = runCatching { LocalDate.parse(draft.departure) }.getOrDefault(LocalDate.now())
+        val start = date(draft.departure) ?: LocalDate.now()
         val dialog = DatePickerDialog(this, { _, year, month, day ->
             val value = LocalDate.of(year, month + 1, day)
             if (end && value.isBefore(start)) message("종료일은 출발일 이후로 골라 주세요.")
-            else { if (end) draft.endDate = value.toString() else { draft.departure = value.toString(); if (runCatching { LocalDate.parse(draft.endDate).isBefore(value) }.getOrDefault(false)) draft.endDate = "미정" }; render() }
+            else {
+                if (end) draft.endDate = value.toString()
+                else { draft.departure = value.toString(); if (date(draft.endDate)?.isBefore(value) == true) draft.endDate = "미정" }
+                render()
+            }
         }, start.year, start.monthValue - 1, start.dayOfMonth)
         if (end) dialog.setButton(AlertDialog.BUTTON_NEUTRAL, "미정") { _, _ -> draft.endDate = "미정"; render() }
         dialog.show()
@@ -170,7 +825,9 @@ class PhoneActivity : ScreenActivity() {
 
     override fun onSaveInstanceState(out: Bundle) {
         out.putString("filter", filter); out.putString("photoTab", photoTab); out.putStringArrayList("selected", ArrayList(selectedPlaces))
-        out.putIntegerArrayList("photos", ArrayList(selectedPhotos)); out.putIntegerArrayList("recorded", ArrayList(recordedPhotos)); out.putBoolean("added", addedStop)
+        out.putIntegerArrayList("photos", ArrayList(selectedPhotos)); out.putIntegerArrayList("recorded", ArrayList(recordedPhotos))
+        out.putStringArrayList("moments", ArrayList(moments)); out.putInt("recap", recapIndex)
+        out.putStringArrayList("driveEvents", ArrayList(driveEvents.map { it.toJson() }))
         super.onSaveInstanceState(out)
     }
     override fun restore(state: Bundle) {
@@ -178,6 +835,37 @@ class PhoneActivity : ScreenActivity() {
         filter = state.getString("filter", "전체"); photoTab = state.getString("photoTab", "제안")
         selectedPlaces.clear(); selectedPlaces.addAll(state.getStringArrayList("selected").orEmpty())
         selectedPhotos.addAll(state.getIntegerArrayList("photos").orEmpty()); recordedPhotos.addAll(state.getIntegerArrayList("recorded").orEmpty())
-        addedStop = state.getBoolean("added")
+        moments.addAll(state.getStringArrayList("moments").orEmpty()); recapIndex = state.getInt("recap")
+        driveEvents.addAll(state.getStringArrayList("driveEvents").orEmpty().mapNotNull { runCatching { DriveEvent.fromJson(it) }.getOrNull() })
     }
 }
+
+/** Wraps children onto new rows, for the interest chips (the platform has no flow layout). */
+private class FlowLayout(context: Context, private val gap: Int) : ViewGroup(context) {
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        val maxWidth = MeasureSpec.getSize(widthSpec) - paddingLeft - paddingRight
+        var x = 0; var y = 0; var rowHeight = 0
+        for (i in 0 until childCount) {
+            val child = getChildAt(i)
+            measureChild(child, MeasureSpec.makeMeasureSpec(maxWidth, MeasureSpec.AT_MOST), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
+            if (x > 0 && x + child.measuredWidth > maxWidth) { x = 0; y += rowHeight + gap; rowHeight = 0 }
+            x += child.measuredWidth + gap; rowHeight = maxOf(rowHeight, child.measuredHeight)
+        }
+        setMeasuredDimension(MeasureSpec.getSize(widthSpec), y + rowHeight + paddingTop + paddingBottom)
+    }
+
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        val maxWidth = r - l - paddingLeft - paddingRight
+        var x = 0; var y = 0; var rowHeight = 0
+        for (i in 0 until childCount) {
+            val child = getChildAt(i)
+            if (x > 0 && x + child.measuredWidth > maxWidth) { x = 0; y += rowHeight + gap; rowHeight = 0 }
+            child.layout(paddingLeft + x, paddingTop + y, paddingLeft + x + child.measuredWidth, paddingTop + y + child.measuredHeight)
+            x += child.measuredWidth + gap; rowHeight = maxOf(rowHeight, child.measuredHeight)
+        }
+    }
+}
+
+private const val REQUEST_LOCATION = 7
+private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT

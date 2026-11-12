@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+    <include layout="@layout/panel_map" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="20dp" android:layout_marginBottom="16dp">
+        <TextView style="@style/Text.Eyebrow" android:text="@string/preview_trip_label" />
+        <TextView style="@style/Text.Title" android:text="@string/preview_trip" android:textSize="18sp" android:layout_marginTop="10dp" />
+        <TextView style="@style/Text.Body" android:text="@string/preview_trip_date" android:layout_marginTop="7dp" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_choice_selected" android:padding="20dp" android:layout_marginBottom="24dp">
+        <TextView style="@style/Text.Title" android:text="@string/preview_import" android:textSize="18sp" />
+        <TextView style="@style/Text.Body" android:text="@string/preview_import_detail" android:layout_marginTop="8dp" />
+    </LinearLayout>
+    <TextView style="@style/Text.Eyebrow" android:text="@string/preview_past_label" android:layout_marginBottom="12dp" />
+    <TextView style="@style/Text.Title" android:text="@string/preview_past_trip" android:textSize="17sp" />
+    <TextView style="@style/Text.Body" android:text="@string/preview_past_detail" android:layout_marginTop="6dp" />
+</LinearLayout>

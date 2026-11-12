@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">차곡</string>
+    <string name="preview_title">여행</string>
+    <string name="preview_badge">P01 · 샘플 데이터 · 연동 전</string>
+    <string name="back">이전</string>
+    <string name="map_description">예시 여행 경로. 실제 지도·위치를 사용하지 않습니다.</string>
+    <string name="map_caption">예시 경로 · 지도 연동 전</string>
+    <string name="preview_trip_label">다가오는 여행</string>
+    <string name="preview_trip">부모님과 강릉 드라이브</string>
+    <string name="preview_trip_date">11월 22일 · 장소 3곳</string>
+    <string name="preview_import">저장해 둔 영상에서\n다음 여행 찾기</string>
+    <string name="preview_import_detail">추천 탭에서 만나 보세요.</string>
+    <string name="preview_past_label">지난 여행</string>
+    <string name="preview_past_trip">속초 1박 2일</string>
+    <string name="preview_past_detail">10월 · 214 km · 장소 7곳 · 예시</string>
+    <string name="nav_trip">여행</string>
+    <string name="nav_recommend">추천</string>
+    <string name="nav_add">+</string>
+    <string name="nav_record">기록</string>
+    <string name="nav_my">MY</string>
+</resources>

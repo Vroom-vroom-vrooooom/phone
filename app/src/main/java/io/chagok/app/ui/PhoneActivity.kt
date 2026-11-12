@@ -95,10 +95,9 @@ class PhoneActivity : ScreenActivity() {
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        // Page background of the Chagok panel on Pleos: lavender haze at the top fading to warm paper.
+        // bg_chagok of the car app: lavender at the top fading to warm paper.
         findViewById<ViewGroup>(android.R.id.content).getChildAt(0).background = GradientDrawable().apply {
-            gradientType = GradientDrawable.RADIAL_GRADIENT; setGradientCenter(0.5f, 0f)
-            gradientRadius = resources.displayMetrics.heightPixels * 0.8f
+            orientation = GradientDrawable.Orientation.TOP_BOTTOM
             colors = intArrayOf(getColor(R.color.phone_bg_top), getColor(R.color.phone_bg_mid), getColor(R.color.phone_bg_bottom))
         }
         swipe = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
@@ -174,23 +173,52 @@ class PhoneActivity : ScreenActivity() {
 
     private fun home() {
         pageHeader("여행", profile = true)
-        // Same greeting as the car's start screen: orb + one line with the companion and destination in deep green.
-        val hello = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        hello.addView(orb(), lp(dp(72), dp(72)).apply { marginEnd = dp(14) })
-        val who = draft.companions.firstOrNull()?.takeIf { it != "혼자" }
-        hello.addView(TextView(this).apply {
-            textSize = 19f; setTextColor(pInk); setLineSpacing(dp(3).toFloat(), 1f)
-            text = emphasize(listOfNotNull(who?.let { it to true }, who?.let { withParticle(it) + " " to false },
-                draft.destination to true, " 가는 날까지\n" to false, dDayWords() to false))
-        }, lp(0, WRAP, 1f))
-        put(hello, gap = 18)
-        val trip = timelineCard(itineraryPlaces().map { TimeRow(it.time, it.name, right = it.duration) },
-            head = "다가오는 여행", tag = dDay(), title = tripName()) { navigate(Screen.ITINERARY) }
-        trip.contentDescription = "${tripName()}, ${dateLabel(draft.departure)}, 장소 ${itineraryIds.size}곳. 일정 보기"
-        map()
+        content.addView(orb(), lp(dp(104), dp(104)).apply { gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(16) })
+        put(TextView(this).apply {
+            textSize = 24f; setTextColor(pInk); typeface = medium(); gravity = Gravity.CENTER
+            setLineSpacing(0f, 1.2f); letterSpacing = -0.02f
+            text = helloLine()
+        }, gap = 22)
+        val places = itineraryPlaces()
+        timelineCard(places.map { TimeRow(it.time, it.name, right = it.duration) },
+            meta = "${dateLabel(draft.departure)} · ${withWho()}", tag = draft.mood,
+            foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  ")) { navigate(Screen.ITINERARY) }
+            .contentDescription = "${tripName()}, ${dateLabel(draft.departure)}, 장소 ${places.size}곳. 일정 보기"
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        buttons.addView(actionButton("일정 바꾸기", primary = false) { navigate(Screen.ITINERARY) }, lp(0, dp(58), 1f))
+        buttons.addView(actionButton("차로 보내기", primary = true) {
+            if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else integration(repository.stageTrip(draft, places))
+        }, lp(0, dp(58), 1.8f).apply { marginStart = dp(9) })
+        put(buttons, gap = 26)
         tile("저장해 둔 릴스에서 다음 여행 찾기", "+ 에서 추천 장소 보기", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
         tile("이번 여행 기록", "${draft.destination} · 남긴 장소 ${2 + moments.size}곳") { navigate(Screen.TIMELINE) }
         tile("지난 여행 돌아보기", "여행 ${pastTrips.size}개 · 날짜 · 장소 · 사진") { showPast(0, push = true) }
+    }
+
+    /** Car start line ("오늘은 속초로\n떠나는 날이에요"), counted down on the phone before the day. */
+    private fun helloLine(): CharSequence {
+        val dest = draft.destination
+        val days = date(draft.departure)?.let { ChronoUnit.DAYS.between(LocalDate.now(), it) }
+        return when {
+            days == null -> emphasize(listOf(dest to true, "${toward(dest)} 떠날 날을\n정해 볼까요?" to false))
+            days > 0 -> emphasize(listOf(dest to true, "${toward(dest)} 떠나기까지\n" to false, "${days}일 남았어요" to false))
+            days == 0L -> emphasize(listOf("오늘은 " to false, dest to true, "${toward(dest)}\n떠나는 날이에요" to false))
+            else -> emphasize(listOf(dest to true, " 여행에서\n돌아왔어요" to false))
+        }
+    }
+
+    /** Car start meta: "부모님과 함께" / "혼자 떠나요". */
+    private fun withWho(): String {
+        val who = draft.companions.toList()
+        return if (who.isEmpty() || who == listOf("혼자")) "혼자 떠나요" else "${who.joinToString(", ").let { it + withParticle(it) }} 함께"
+    }
+
+    /** 으로/로: 로 after a vowel or ㄹ. */
+    private fun toward(word: String): String {
+        val c = word.lastOrNull() ?: return "로"
+        if (c !in '가'..'힣') return "로"
+        val tail = (c - '가') % 28
+        return if (tail == 0 || tail == 8) "로" else "으로"
     }
 
     private class FanItem(val label: String, val description: String, val icon: Int, val go: () -> Unit)
@@ -359,7 +387,7 @@ class PhoneActivity : ScreenActivity() {
         else timelineCard(places.mapIndexed { index, place ->
             TimeRow(place.time, place.name, right = place.duration, onLong = { reorder(index, place) },
                 description = "${index + 1}번째 ${place.name}, ${place.time}, ${place.duration}. 길게 눌러 순서 바꾸기")
-        }, head = "길게 눌러 순서 바꾸기")
+        }, meta = "길게 눌러 순서 바꾸기", tag = draft.mood, foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "))
         tile("사이에 들를 곳 더 찾기", "동선 근처 장소를 제안해요", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
         primary("차로 보내기") {
             if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else integration(repository.stageTrip(draft, places))
@@ -661,7 +689,7 @@ class PhoneActivity : ScreenActivity() {
         map()
         timelineCard(trip.stops.map {
             TimeRow(it.time, it.name, sub = listOf(it.where, it.note).filter(String::isNotEmpty).joinToString("\n"), right = "사진 ${it.photos}")
-        }, head = "다녀온 곳")
+        }, meta = "다녀온 곳", tag = trip.who)
         put(label("사진 ${trip.stops.sumOf { it.photos }}장 · 예시", 12, pMuted), gap = 8)
         trip.stops.flatMap { stop -> List(stop.photos) { stop.name } }.take(9).chunked(3).forEach { names ->
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -797,11 +825,11 @@ class PhoneActivity : ScreenActivity() {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(48)
             setPadding(dp(18), dp(14), dp(16), dp(14))
             background = when {
-                on -> shape(pAccentSoft, pAccent, 20f)
-                dashed -> shape(Color.TRANSPARENT, pDot, 20f, dashed = true)
+                on -> shape(pAccentSoft, null, 22f)
+                dashed -> shape(Color.TRANSPARENT, pDot, 22f, dashed = true)
                 else -> cardBg().also { lift(this) }
             }
-            if (onClick != null) { isClickable = true; isFocusable = true; foreground = ripple(20f); setOnClickListener { onClick() } }
+            if (onClick != null) { isClickable = true; isFocusable = true; foreground = ripple(22f); setOnClickListener { onClick() } }
             if (selected != null) { isSelected = on; contentDescription = listOfNotNull(title, sub, if (on) "선택됨" else "선택 안 됨").joinToString(", ") }
         }
         if (icon) row.addView(View(this).apply { background = oval(if (on) pSurface else pFill) }, lp(dp(36), dp(36)).apply { marginEnd = dp(14) })
@@ -841,7 +869,7 @@ class PhoneActivity : ScreenActivity() {
             flow.addView(Button(this, null, 0).apply {
                 text = value; textSize = 14f; gravity = Gravity.CENTER; minHeight = dp(44); setPadding(dp(16), 0, dp(16), 0)
                 setTextColor(if (on) pAccent else pInk); typeface = if (on) medium() else Typeface.DEFAULT
-                background = if (on) shape(pAccentSoft, pAccent, 999f) else shape(pSurface, pLine, 999f, strokeDp = 1f)
+                background = if (on) shape(pAccentSoft, null, 999f) else shape(Color.argb(217, 255, 255, 255), pLine, 999f, strokeDp = 1f) // bg_place_chip
                 foreground = ripple(999f); isSelected = on; contentDescription = "$value${if (on) ", 선택됨" else ""}"
                 setOnClickListener { onClick(value) }
             }, ViewGroup.LayoutParams(WRAP, WRAP))
@@ -863,13 +891,15 @@ class PhoneActivity : ScreenActivity() {
 
     private fun primary(text: String, onClick: () -> Unit) {
         actions.visibility = View.VISIBLE
-        actions.addView(actionButton(text, primary = true, onClick = onClick), lp(MATCH, dp(54)))
+        actions.addView(actionButton(text, primary = true, onClick = onClick), lp(MATCH, dp(58)).apply { setMargins(dp(2), dp(4), dp(2), dp(4)) })
     }
 
     private fun actionButton(text: String, primary: Boolean, onClick: () -> Unit) = Button(this, null, 0).apply {
-        this.text = text; textSize = 16f; gravity = Gravity.CENTER; typeface = medium()
+        this.text = text; textSize = 17f; gravity = Gravity.CENTER
         setTextColor(if (primary) Color.WHITE else pInk)
-        background = if (primary) shape(pAccent, null, 999f) else shape(pSurface, pLine, 999f, strokeDp = 1f); foreground = ripple(999f)
+        // Car.Button.Deep (deep pill, 4dp) / Car.Button.Ghost (clear pill, hairline).
+        background = if (primary) shape(pAccent, null, 999f) else shape(Color.TRANSPARENT, pLine, 999f, strokeDp = 1f); foreground = ripple(999f)
+        if (primary) elevation = dpf(4f)
         setOnClickListener { onClick() }
     }
 
@@ -902,8 +932,8 @@ class PhoneActivity : ScreenActivity() {
     }
 
     /** Tag from the Pleos panel: green pill with deep text; muted ones sit on the soft fill. */
-    private fun pill(value: String, color: Int) = label(value, 12, if (color == pAccent) pAccent else pMuted).apply {
-        setPadding(dp(11), dp(4), dp(11), dp(4)); background = shape(if (color == pAccent) pAccentSoft else pFill, null, 999f)
+    private fun pill(value: String, color: Int) = label(value, 13, if (color == pAccent) pAccent else pMuted).apply {
+        setPadding(dp(10), dp(3), dp(10), dp(3)); background = shape(if (color == pAccent) pAccentSoft else pFill, null, 999f)
     }
 
     private class TimeRow(
@@ -911,39 +941,46 @@ class PhoneActivity : ScreenActivity() {
         val onLong: (() -> Unit)? = null, val description: String? = null,
     )
 
-    /** Trip card of the car start screen: optional head + tag + title, then time · dot on a rail · place · right text. */
-    private fun timelineCard(rows: List<TimeRow>, head: String? = null, tag: String? = null, title: String? = null, onClick: (() -> Unit)? = null): LinearLayout {
+    /**
+     * Trip card of the car start screen (bg_trip_card + routeRow): meta + mood tag, then time (15sp) · rail with an 11dp dot ·
+     * place (18sp medium) · note (14sp); middle dots deep, the last one pale; hairline and a foot line when given.
+     */
+    private fun timelineCard(rows: List<TimeRow>, meta: String? = null, tag: String? = null, foot: String? = null, onClick: (() -> Unit)? = null): LinearLayout {
         val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(18), dp(12)); background = cardBg(); lift(this)
-            if (onClick != null) { isClickable = true; foreground = ripple(20f); setOnClickListener { onClick() } }
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(18), dp(20), dp(15)); background = cardBg(); lift(this)
+            if (onClick != null) { isClickable = true; foreground = ripple(22f); setOnClickListener { onClick() } }
         }
-        if (head != null || tag != null) card.addView(LinearLayout(this).apply {
+        if (meta != null || tag != null) card.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(label(head.orEmpty(), 13, pMuted), lp(0, WRAP, 1f)); tag?.let { addView(pill(it, pAccent)) }
-        }, lp(MATCH, WRAP).apply { bottomMargin = dp(if (title != null) 4 else 6) })
-        title?.let { card.addView(label(it, 18, pInk, bold = true), lp(MATCH, WRAP).apply { bottomMargin = dp(8) }) }
+            addView(label(meta.orEmpty(), 14, pMuted), lp(0, WRAP, 1f)); tag?.let { addView(pill(it, pAccent)) }
+        }, lp(MATCH, WRAP).apply { bottomMargin = dp(10) })
         rows.forEachIndexed { i, r ->
+            val last = i == rows.lastIndex
             val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(56)
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(40)
                 r.onLong?.let { long ->
                     isLongClickable = true; isClickable = true; foreground = ripple(12f)
                     setOnClickListener { message("길게 누르면 순서를 바꿀 수 있어요.") }; setOnLongClickListener { long(); true }
                 }
                 contentDescription = r.description ?: listOfNotNull(r.time, r.title, r.sub, r.right).joinToString(", ")
             }
-            row.addView(label(r.time, 13, pMuted), lp(dp(58), WRAP))
+            row.addView(label(r.time, 15, pMuted).apply { fontFeatureSettings = "tnum" }, lp(dp(59), WRAP))
             row.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
                 addView(View(this@PhoneActivity).apply { setBackgroundColor(if (i > 0) pRail else Color.TRANSPARENT) }, lp(dp(2), 0, 1f))
-                addView(View(this@PhoneActivity).apply { background = oval(if (i == 0) pAccent else pDot) }, lp(dp(10), dp(10)))
-                addView(View(this@PhoneActivity).apply { setBackgroundColor(if (i < rows.lastIndex) pRail else Color.TRANSPARENT) }, lp(dp(2), 0, 1f))
-            }, lp(dp(28), MATCH))
+                addView(View(this@PhoneActivity).apply { background = oval(if (last && rows.size > 1) pDot else pAccent) }, lp(dp(11), dp(11)))
+                addView(View(this@PhoneActivity).apply { setBackgroundColor(if (!last) pRail else Color.TRANSPARENT) }, lp(dp(2), 0, 1f))
+            }, lp(dp(32), MATCH))
             row.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; setPadding(dp(6), dp(8), dp(8), dp(8))
-                addView(label(r.title, 16, pInk, medium = true)); r.sub?.let { addView(label(it, 12, pMuted)) }
+                orientation = LinearLayout.VERTICAL; if (r.sub != null) setPadding(0, dp(8), dp(8), dp(8))
+                addView(label(r.title, if (r.sub == null) 18 else 17, pInk, medium = true)); r.sub?.let { addView(label(it, 13, pMuted)) }
             }, lp(0, WRAP, 1f))
-            r.right?.let { row.addView(label(it, 13, pMuted)) }
+            r.right?.let { row.addView(label(it, 14, pMuted)) }
             card.addView(row, lp(MATCH, WRAP))
+        }
+        if (foot != null) {
+            card.addView(View(this).apply { setBackgroundColor(pLine) }, lp(MATCH, dp(1)).apply { topMargin = dp(9) })
+            card.addView(label(foot, 13, pMuted), lp(MATCH, WRAP).apply { topMargin = dp(11) })
         }
         put(card)
         return card
@@ -977,8 +1014,8 @@ class PhoneActivity : ScreenActivity() {
     }
     private fun oval(fill: Int) = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(fill) }
     /** Panel card: translucent white, 20dp corners, no border (the shadow does the separating). */
-    private fun cardBg() = shape(Color.argb(235, 255, 255, 255), null, 20f)
-    private fun lift(view: View) { view.elevation = dpf(2f); view.outlineAmbientShadowColor = shadow; view.outlineSpotShadowColor = shadow }
+    private fun cardBg() = shape(Color.argb(230, 255, 255, 255), null, 22f) // bg_trip_card #E6FFFFFF, 22dp
+    private fun lift(view: View) { view.elevation = dpf(3f) }
     private fun medium(): Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     private fun ripple(radius: Float) = RippleDrawable(ColorStateList.valueOf(Color.argb(28, 0, 0, 0)), null, shape(Color.BLACK, null, radius))
     private fun dpf(value: Float) = value * resources.displayMetrics.density

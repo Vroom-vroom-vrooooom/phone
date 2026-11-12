@@ -3,9 +3,9 @@
     <style name="Theme.Chagok" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:colorAccent">@color/phone_accent</item>
-        <item name="android:windowBackground">@color/phone_surface</item>
-        <item name="android:statusBarColor">@color/phone_surface</item>
-        <item name="android:navigationBarColor">@color/phone_surface</item>
+        <item name="android:windowBackground">@color/phone_bg_mid</item>
+        <item name="android:statusBarColor">@color/phone_bg_top</item>
+        <item name="android:navigationBarColor">@color/phone_bg_bottom</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
         <item name="android:textColorPrimary">@color/phone_ink</item>

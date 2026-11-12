@@ -1,8 +1,8 @@
 # 차곡 · 폰 앱
 
-차곡의 폰 앱(P01~P15)입니다. 여행 설정 → 추천 → 일정 → 차로 보내기, 도착 후 사진 → 기록 → 요약 흐름을 샘플 데이터로 보여 줍니다. 백엔드·실제 API는 아직 연결하지 않았습니다.
+차곡의 폰 앱(P01~P16)입니다. 여행 설정 → 추천 → 일정 → 차로 보내기, 도착 후 사진 → 기록 → 요약 흐름을 샘플 데이터로 보여 줍니다. 백엔드·실제 API는 아직 연결하지 않았습니다.
 
-화면 이동은 하단 가운데 `+` 하나로 합니다. 누르면 새 여행 · 추천 장소 · 지금 기록 · 기록 보기 · 모아보기가 부채꼴로 펼쳐집니다. MY는 홈 오른쪽 위, 홈이 아닌 모든 화면은 왼쪽 위에 `‹ 이전`이 있습니다. 색은 pleos 차량 목업(`mockup/pleos-screen.html`)의 초록 계열에 맞췄습니다. 위치 권한은 기록 탭에서 "지금 이 장소 기록" / "위치 찾기"를 누를 때만 요청합니다.
+화면 이동은 하단 가운데 `+` 하나로 합니다. 누르면 새 여행 · 추천 장소 · 지금 기록 · 기록 보기 · 모아보기가 부채꼴로 펼쳐집니다. MY는 홈 오른쪽 위, 홈이 아닌 모든 화면은 왼쪽 위에 `‹ 이전`이 있습니다. 디자인은 pleos 차곡 패널(`mockup/pleos-screen.html`의 `#chagok`)에 맞췄습니다: 연보라→크림 배경, 테두리 없는 둥근 카드, 짙은 초록 알약 버튼, 연두 태그, 시간·점·장소 세로선 일정 카드, 파스텔 구체(`CompanionOrbView.kt`, pleos에서 복사). MY에는 "지난 여행 돌아보기"(P16, 여행마다 날짜·지역·지도·장소·사진을 옆으로 넘겨 보기)와 로그인/로그아웃(데모, 계정 서버 연동 전)이 있습니다. 위치 권한은 기록 탭에서 "지금 이 장소 기록" / "위치 찾기"를 누를 때만 요청합니다.
 
 - 차량(Pleos) 앱: https://github.com/Vroom-vroom-vrooooom/pleos
 - 두 앱을 잇는 메시지: [CONTRACT.md](CONTRACT.md) · `domain/TripContract.kt`
@@ -31,7 +31,8 @@ Android Studio로 이 폴더를 열거나 `gradlew.bat assembleDebug`(JDK 17, An
 
 ```text
 app/src/main/java/io/chagok/app/
-  ui/PhoneActivity.kt        폰 15개 화면(P14 MY, P15 한눈에 모아보기 포함)과 화면 부품(카드·칩·세그먼트·탭) · DriveEvent 수신 · 이 레포에서 주로 고치는 파일
+  ui/CompanionOrbView.kt     파스텔 구체 (pleos 레포에서 복사, 같은 모양 유지)
+  ui/PhoneActivity.kt        폰 16개 화면(P14 MY, P15 한눈에 모아보기, P16 지난 여행 돌아보기 포함)과 화면 부품(카드·칩·세그먼트·탭) · DriveEvent 수신 · 이 레포에서 주로 고치는 파일
   ui/ScreenActivity.kt       공통 화면 부품 (pleos 레포와 같은 파일)
   domain/TripContract.kt     폰↔Pleos 메시지 (pleos 레포와 반드시 같은 파일)
   domain/Models.kt           화면 ID, 여행 설정, 장소, 연동 Port

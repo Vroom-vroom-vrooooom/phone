@@ -87,11 +87,6 @@ class PhoneActivity : ScreenActivity() {
     private val plusScreens = setOf(Screen.HOME, Screen.START, Screen.RECOMMENDATIONS, Screen.ITINERARY, Screen.TIMELINE, Screen.SUMMARY, Screen.MY)
     /** ponytail: sample stand-in for "far from the route"; the recommendation API will return this. */
     private val farFromRoute = setOf("jeongdongjin")
-    /** ponytail: sample coordinates for the current-location suggestion; the places API will return real ones. */
-    private val sampleCoords = mapOf(
-        "anmok" to (37.7722 to 128.9473), "chodang" to (37.7915 to 128.9145), "gyeongpo" to (37.7965 to 128.9000),
-        "jeongdongjin" to (37.6908 to 129.0345), "gyeongpodae" to (37.7953 to 128.8964),
-    )
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
@@ -369,7 +364,7 @@ class PhoneActivity : ScreenActivity() {
         put(segmented(listOf("전체", "저장", "좋아요", "보낸"), { it == filter }) { filter = it; render() })
         repository.places.filter { filter == "전체" || it.group == filter }.forEach { place ->
             val far = place.id in farFromRoute
-            option(place.name, "${place.source}\n${place.reason}", place.id in selectedPlaces, icon = false) {
+            option(place.name, listOf(place.source, place.reason, place.open).filter(String::isNotEmpty).joinToString("\n"), place.id in selectedPlaces, icon = false) {
                 if (!selectedPlaces.add(place.id)) selectedPlaces.remove(place.id); render()
             }.alpha = if (far) 0.55f else 1f
         }
@@ -385,8 +380,8 @@ class PhoneActivity : ScreenActivity() {
         val places = itineraryPlaces()
         if (places.isEmpty()) put(label("담은 장소가 없어요. 추천에서 골라 주세요.", 14, pMuted))
         else timelineCard(places.mapIndexed { index, place ->
-            TimeRow(place.time, place.name, right = place.duration, onLong = { reorder(index, place) },
-                description = "${index + 1}번째 ${place.name}, ${place.time}, ${place.duration}. 길게 눌러 순서 바꾸기")
+            TimeRow(place.time, place.name, sub = place.open.ifEmpty { null }, right = place.duration, onLong = { reorder(index, place) },
+                description = listOf("${index + 1}번째 ${place.name}", place.time, place.duration, place.open).filter(String::isNotEmpty).joinToString(", ") + ". 길게 눌러 순서 바꾸기")
         }, meta = "길게 눌러 순서 바꾸기", tag = draft.mood, foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "))
         tile("사이에 들를 곳 더 찾기", "동선 근처 장소를 제안해요", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
         primary("차로 보내기") {
@@ -511,12 +506,16 @@ class PhoneActivity : ScreenActivity() {
     private fun onLocated(location: Location?) {
         if (location == null) { locating = false; nearby = null; message("현재 위치를 찾지 못했어요."); render(); return }
         val candidates = repository.places + repository.radioPlace
-        val closest = sampleCoords.mapNotNull { (id, ll) ->
-            val place = candidates.find { it.id == id } ?: return@mapNotNull null
-            val out = FloatArray(1); Location.distanceBetween(location.latitude, location.longitude, ll.first, ll.second, out); place to out[0]
+        // Places carry lat/lng (contract v1, optional); ones without coordinates are skipped.
+        val closest = candidates.mapNotNull { place ->
+            val lat = place.lat ?: return@mapNotNull null; val lng = place.lng ?: return@mapNotNull null
+            val out = FloatArray(1); Location.distanceBetween(location.latitude, location.longitude, lat, lng, out); place to out[0]
         }.minByOrNull { it.second }
         if (closest != null && closest.second < 1500f) {
-            locating = false; nearby = closest.first.name to "지금 위치에서 ${distanceLabel(closest.second)} · 여기 들렀나요?"; render(); return
+            val (place, meters) = closest
+            locating = false
+            nearby = place.name to listOf("지금 위치에서 ${distanceLabel(meters)}", place.open, "여기 들렀나요?").filter(String::isNotEmpty).joinToString(" · ")
+            render(); return
         }
         // No known place nearby: name the spot from the address (Geocoder may block, so off the main thread).
         Thread {

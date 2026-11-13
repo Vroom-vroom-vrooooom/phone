@@ -185,7 +185,7 @@ class PhoneActivity : ScreenActivity() {
             if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else integration(repository.stageTrip(draft, places))
         }, lp(0, dp(58), 1.8f).apply { marginStart = dp(9) })
         put(buttons, gap = 26)
-        tile("저장해 둔 릴스에서 다음 여행 찾기", "+ 에서 추천 장소 보기", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
+        tile("유튜브에서 본 곳으로 다음 여행 찾기", "좋아요 · 재생목록 · 구독 채널", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
         tile("이번 여행 기록", "${draft.destination} · 남긴 장소 ${2 + moments.size}곳") { navigate(Screen.TIMELINE) }
         tile("지난 여행 돌아보기", "여행 ${pastTrips.size}개 · 날짜 · 장소 · 사진") { showPast(0, push = true) }
     }
@@ -227,7 +227,7 @@ class PhoneActivity : ScreenActivity() {
         val animate = shownScreen != Screen.START
         val items = listOf(
             FanItem("새 여행", "새 여행 만들기, 목적지부터 5단계", R.drawable.ic_fan_trip) { leaveFanTo(Screen.DESTINATION) },
-            FanItem("추천 장소", "추천 장소 보기", R.drawable.ic_fan_reco) { leaveFanTo(Screen.RECOMMENDATIONS) },
+            FanItem("추천 장소", "추천 장소 보기, 유튜브에서 찾은 곳", R.drawable.ic_fan_reco) { leaveFanTo(Screen.RECOMMENDATIONS) },
             FanItem("지금 기록", "지금 이 장소 기록, 현재 위치로 근처 장소 찾기", R.drawable.ic_fan_pin) { leaveFanTo(Screen.TIMELINE); locateHere() },
             FanItem("기록 보기", "기록 보기", R.drawable.ic_fan_list) { leaveFanTo(Screen.TIMELINE) },
             FanItem("모아보기", "한눈에 모아보기, 기록을 한 장씩 넘겨 보기", R.drawable.ic_fan_recap) { recapIndex = 0; leaveFanTo(Screen.RECAP) },
@@ -345,14 +345,12 @@ class PhoneActivity : ScreenActivity() {
     }
 
     private fun importVideos() {
-        wizardHeader(5, "가져오기", "저장해 둔 영상에서 찾아볼까요?", "건너뛰어도 일정은 만들어져요")
-        listOf(
-            Triple("유튜브 연결", "좋아요·재생목록의 쇼츠", "연동 예정"),
-            Triple("공유로 보내기", "릴스·쇼츠 공유 → 차곡", "연동 예정"),
-            Triple("인스타 내려받기 파일", "저장함·좋아요·보낸 릴스", "파일 · 예정"),
-            Triple("유튜브 시청 기록", "구글 내보내기 파일로만", "파일 · 예정"),
-        ).forEach { (name, hint, status) -> tile(name, hint, icon = true, trailing = pill(status, pMuted), gap = 10) { integration(repository.importFrom(name)) } }
-        tile("인스타 계정 연결", "공식 경로 없음", icon = true, trailing = pill("준비 중", pMuted)).alpha = 0.5f
+        wizardHeader(5, "유튜브", "유튜브에서 찾아볼까요?", "본 영상 속 장소를 일정 후보로 모아요. 건너뛰어도 돼요")
+        // YouTube Data API (OAuth) can read liked videos, own playlists and subscriptions; history only via Takeout.
+        tile("유튜브 연결", "좋아요한 영상 · 내 재생목록 · 구독 채널", icon = true, trailing = pill("연동 예정", pAccent), gap = 10) { integration(repository.importFrom("유튜브")) }
+        tile("링크 공유로 보내기", "유튜브나 다른 앱에서 공유 → 차곡", icon = true, trailing = pill("연동 예정", pMuted), gap = 10) { integration(repository.importFrom("공유 링크")) }
+        tile("유튜브 시청 기록 파일", "Google 테이크아웃에서 내려받은 파일", icon = true, trailing = pill("파일 · 예정", pMuted)) { integration(repository.importFrom("시청 기록 파일")) }
+        put(label("시청 기록과 '나중에 볼 동영상'은 유튜브가 앱에 열어 주지 않아 파일로만 가져올 수 있어요.", 12, pMuted))
         primary("장소 찾기") { navigate(Screen.RECOMMENDATIONS) }
         textButton("건너뛰기", into = actions) { navigate(Screen.ITINERARY) }
     }
@@ -360,8 +358,8 @@ class PhoneActivity : ScreenActivity() {
     // ── P08 · P09 ───────────────────────────────────────────────────────────
 
     private fun recommendations() {
-        pageHeader("추천", sub = "영상에서 찾은 장소 · 샘플")
-        put(segmented(listOf("전체", "저장", "좋아요", "보낸"), { it == filter }) { filter = it; render() })
+        pageHeader("추천", sub = "유튜브에서 찾은 장소 · 샘플")
+        put(segmented(listOf("전체", "좋아요", "재생목록", "구독"), { it == filter }) { filter = it; render() })
         repository.places.filter { filter == "전체" || it.group == filter }.forEach { place ->
             val far = place.id in farFromRoute
             option(place.name, listOf(place.source, place.reason, place.open).filter(String::isNotEmpty).joinToString("\n"), place.id in selectedPlaces, icon = false) {
@@ -619,7 +617,7 @@ class PhoneActivity : ScreenActivity() {
         tile("위치 사용", "'지금 이 장소 기록'을 누를 때만 써요", trailing = pill(if (located) "허용됨" else "꺼짐", if (located) pAccent else pMuted), gap = 20)
         put(label("연결", 12, pMuted), gap = 8)
         tile("차량 연결", "Pleos 차량 앱과 여행 주고받기", trailing = pill("연동 전", pMuted), gap = 8)
-        tile("유튜브 연결", "저장한 쇼츠에서 장소 찾기", trailing = pill("연동 예정", pMuted), gap = 20)
+        tile("유튜브 연결", "좋아요 · 재생목록 · 구독 채널에서 장소 찾기", trailing = pill("연동 예정", pMuted), gap = 20)
         put(label("계정", 12, pMuted), gap = 8)
         if (provider == null) tile("로그인", "카카오 · Google · 이메일", trailing = pill("데모", pMuted)) { signIn() }
         else tile("로그아웃", "$provider 계정에서 나가기") { signOut() }

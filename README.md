@@ -11,6 +11,16 @@
 - 폰 화면 디자인 기준: [차곡 와이어프레임 · 단계별 플로우](https://claude.ai/artifact/N4BmsuVCA7ZDY79QVjjMvP) 캔버스의 폰 1~13
 - 웹 목업(폰·차량 함께 보기): [mockup/README.md](mockup/README.md) · `node mockup/wireframe-server.cjs`
 
+## 백엔드 연결
+
+서버: `https://chagok-api-om4h3skohq-du.a.run.app` (backend 레포, `app/build.gradle`의 `API_BASE_URL`). 연결 코드는 `data/ChagokApi.kt`입니다.
+
+- MY → 로그인: 팀 관리자가 만든 이메일 계정으로 `POST /v1/auth/login`. 토큰은 이 앱의 private 설정에만 둡니다(출시 전 Keystore로 옮길 것). 초대 키·Claude 키는 앱에 넣지 않습니다.
+- 차로 보내기(홈·P09): 로그인 상태면 여행 저장(`POST`/`PUT /v1/trips`) → 계정의 Pleos 기기 찾기(`GET /v1/devices`) → `POST /v1/trips/{id}/stage`. 큐 등록은 차량 화면 반영을 뜻하지 않습니다. 로그인 전에는 예전처럼 logcat 데모(`relay.sh`용)입니다.
+- 기록(P12): 로그인 + 보낸 여행이 있으면 `GET /v1/trips/{id}/events`를 10초마다 가져옵니다. adb `--es chagok.event`도 그대로 받습니다.
+- 공개 범위: 폰은 3단계, 서버는 `private`/`link` 2단계라 임시로 "나만"→`private`, 나머지→`link`로 보냅니다(팀 결정 필요).
+- 아직 연결 안 함: AI 추천·장소 추출·요약, 기기 페어링 UI, 회원가입(관리자 전용).
+
 ## 실행
 
 Android Studio로 이 폴더를 열거나 `gradlew.bat assembleDebug`(JDK 17, Android SDK 34)를 실행합니다. 아무 폰 에뮬레이터에서 실행하면 됩니다.

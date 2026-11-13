@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Chagok backend over HTTPS (login, trips, send to car, car events). -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- Asked only when the user taps "지금 이 장소 기록" / "위치 찾기" on P12. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

@@ -18,6 +18,9 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
@@ -30,7 +33,10 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
 import android.widget.*
+import io.chagok.app.BuildConfig
 import io.chagok.app.R
+import io.chagok.app.data.ApiError
+import io.chagok.app.data.ChagokApi
 import io.chagok.app.domain.*
 import java.time.Instant
 import java.time.LocalDate
@@ -65,8 +71,18 @@ class PhoneActivity : ScreenActivity() {
     private var locating = false
     private var recapIndex = 0
     private var pastIndex = 0
-    /** Demo sign-in: provider name while "signed in", null when signed out. No account server yet (BACKEND.md 계정). */
-    private var signedInWith: String? = null
+    /**
+     * Backend session, kept in this app's private preferences: account token (24 h), email, and the server
+     * tripId of the trip on screen. ponytail: move the token to Android Keystore before release (Pleos privacy guide).
+     */
+    private val session by lazy { getSharedPreferences("chagok-session", MODE_PRIVATE) }
+    private val api by lazy { ChagokApi(BuildConfig.API_BASE_URL) { session.getString("token", null) } }
+    private val signedInAs: String? get() = session.getString("email", null)?.takeIf { session.getString("token", null) != null }
+    private val serverTripId: String? get() = session.getString("tripId", null)
+    private val poller = Handler(Looper.getMainLooper())
+    private val pollEvents = object : Runnable {
+        override fun run() { refreshEvents(); poller.postDelayed(this, 10_000) }
+    }
     private var shownScreen: Screen? = null
     private lateinit var actions: LinearLayout
 
@@ -140,6 +156,9 @@ class PhoneActivity : ScreenActivity() {
             draw(); screen = opened; fanOut()
         } else draw()
         plusBar()
+        poller.removeCallbacks(pollEvents)
+        if (screen == Screen.TIMELINE && signedInAs != null && serverTripId != null && !isFinishing) poller.postDelayed(pollEvents, 10_000)
+        if (shownScreen != screen && screen == Screen.TIMELINE) refreshEvents()
         if (shownScreen != screen) { shownScreen = screen; findViewById<ScrollView>(R.id.screen_scroll).let { it.post { it.scrollTo(0, 0) } } }
     }
 
@@ -182,7 +201,7 @@ class PhoneActivity : ScreenActivity() {
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         buttons.addView(actionButton("일정 바꾸기", primary = false) { navigate(Screen.ITINERARY) }, lp(0, dp(58), 1f))
         buttons.addView(actionButton("차로 보내기", primary = true) {
-            if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else integration(repository.stageTrip(draft, places))
+            if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else sendToCar(places)
         }, lp(0, dp(58), 1.8f).apply { marginStart = dp(9) })
         put(buttons, gap = 26)
         tile("유튜브에서 본 곳으로 다음 여행 찾기", "좋아요 · 재생목록 · 구독 채널", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
@@ -383,7 +402,7 @@ class PhoneActivity : ScreenActivity() {
         }, meta = "길게 눌러 순서 바꾸기", tag = draft.mood, foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "))
         tile("사이에 들를 곳 더 찾기", "동선 근처 장소를 제안해요", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
         primary("차로 보내기") {
-            if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else integration(repository.stageTrip(draft, places))
+            if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else sendToCar(places)
         }
     }
 
@@ -451,6 +470,7 @@ class PhoneActivity : ScreenActivity() {
     private fun timeline() {
         pageHeader("기록", sub = "${draft.destination} · ${dateLabel(draft.departure)}")
         map()
+        if (signedInAs != null && serverTripId != null) put(label("서버에서 차의 기록을 10초마다 가져와요", 12, pMuted), gap = 6)
         driveRecord()
         put(label("방문 기록", 12, pMuted), gap = 8)
         tile("안목 커피거리", "10:32 · 사진 3 · 메모 1 · 예시", gap = 10) { navigate(Screen.PHOTOS) }
@@ -583,13 +603,13 @@ class PhoneActivity : ScreenActivity() {
         val profile = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(18)); background = cardBg(); lift(this)
         }
-        val provider = signedInWith
-        profile.addView(label(if (provider != null) "나" else "?", 22, pAccent, bold = true).apply { gravity = Gravity.CENTER; background = oval(pAccentSoft) },
+        val provider = signedInAs
+        profile.addView(label(if (provider != null) provider.first().uppercase() else "?", 22, pAccent, bold = true).apply { gravity = Gravity.CENTER; background = oval(pAccentSoft) },
             lp(dp(60), dp(60)).apply { marginEnd = dp(14) })
         profile.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             if (provider != null) {
-                addView(label("차곡 여행자", 19, pInk, bold = true)); addView(label("$provider 계정 · 함께한 여행 ${pastTrips.size + 1}번", 13, pMuted))
+                addView(label("차곡 여행자", 19, pInk, bold = true)); addView(label(provider, 13, pMuted))
             } else {
                 addView(label("로그인하지 않았어요", 17, pInk, bold = true)); addView(label("로그인하면 다른 기기에서도 기록을 볼 수 있어요", 13, pMuted))
             }
@@ -616,24 +636,109 @@ class PhoneActivity : ScreenActivity() {
         val located = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         tile("위치 사용", "'지금 이 장소 기록'을 누를 때만 써요", trailing = pill(if (located) "허용됨" else "꺼짐", if (located) pAccent else pMuted), gap = 20)
         put(label("연결", 12, pMuted), gap = 8)
-        tile("차량 연결", "Pleos 차량 앱과 여행 주고받기", trailing = pill("연동 전", pMuted), gap = 8)
+        tile("차량 연결", if (provider != null) "같은 계정으로 연결한 차량에 여행을 보내요" else "로그인하면 차량에 여행을 보낼 수 있어요",
+            trailing = pill(if (provider != null) "서버 연결" else "로그인 필요", if (provider != null) pAccent else pMuted), gap = 8)
         tile("유튜브 연결", "좋아요 · 재생목록 · 구독 채널에서 장소 찾기", trailing = pill("연동 예정", pMuted), gap = 20)
         put(label("계정", 12, pMuted), gap = 8)
-        if (provider == null) tile("로그인", "카카오 · Google · 이메일", trailing = pill("데모", pMuted)) { signIn() }
-        else tile("로그아웃", "$provider 계정에서 나가기") { signOut() }
+        if (provider == null) tile("로그인", "팀에서 받은 차곡 계정(이메일)으로") { signIn() }
+        else tile("로그아웃", "$provider 에서 나가기") { signOut() }
     }
 
+    /** Email/password login (POST /v1/auth/login). Accounts are made by the team admin; the app never registers. */
     private fun signIn() {
-        val providers = arrayOf("카카오", "Google", "이메일")
-        AlertDialog.Builder(this).setTitle("로그인").setItems(providers.map { "${it}로 계속하기" }.toTypedArray()) { _, which ->
-            signedInWith = providers[which]; render()
-            message("데모 로그인이에요. 계정 서버는 아직 연결 전이에요.")
-        }.setNegativeButton("취소", null).show()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(8), dp(22), 0) }
+        val email = EditText(this).apply { hint = "이메일"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS; setSingleLine(true) }
+        val password = EditText(this).apply { hint = "비밀번호 (12자 이상)"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD; setSingleLine(true) }
+        box.addView(email, lp(MATCH, WRAP)); box.addView(password, lp(MATCH, WRAP))
+        box.addView(label("계정은 팀 관리자가 만들어 줘요.", 12, pMuted), lp(MATCH, WRAP).apply { topMargin = dp(6) })
+        AlertDialog.Builder(this).setTitle("차곡 로그인").setView(box).setNegativeButton("취소", null)
+            .setPositiveButton("로그인") { _, _ ->
+                val id = email.text.toString().trim(); val secret = password.text.toString()
+                if (id.isEmpty() || secret.length < 12) { message("이메일과 12자 이상 비밀번호를 입력해 주세요."); return@setPositiveButton }
+                remote({ api.login(id, secret) }) { token ->
+                    session.edit().putString("token", token).putString("email", id).apply()
+                    message("로그인했어요."); render()
+                }
+            }.show()
     }
 
     private fun signOut() {
         AlertDialog.Builder(this).setTitle("로그아웃할까요?").setMessage("이 휴대폰에 남긴 기록은 그대로 있어요.")
-            .setPositiveButton("로그아웃") { _, _ -> signedInWith = null; render() }.setNegativeButton("취소", null).show()
+            .setPositiveButton("로그아웃") { _, _ -> session.edit().clear().apply(); render() }.setNegativeButton("취소", null).show()
+    }
+
+    /**
+     * P09 "차로 보내기". Signed in: save the trip (POST/PUT /v1/trips) → pick the account's Pleos device → queue the
+     * TripPlan (/stage). Signed out: the local demo (logcat + dialog) as before, for the adb relay.
+     */
+    private fun sendToCar(places: List<Place>) {
+        if (signedInAs == null) {
+            integration(repository.stageTrip(draft, places)); message("로그인하면 차량으로 실제로 보낼 수 있어요.")
+            return
+        }
+        message("차량으로 보내는 중…")
+        remote({ api.saveTrip(serverTripId, draft, places) to api.pleosDevices() }) { (tripId, cars) ->
+            session.edit().putString("tripId", tripId).apply()
+            when (cars.size) {
+                0 -> AlertDialog.Builder(this).setTitle("연결된 차량이 없어요")
+                    .setMessage("여행은 서버에 저장했어요. 차량 앱에서 이 계정으로 기기를 연결하면 보낼 수 있어요.")
+                    .setPositiveButton("확인", null).show()
+                1 -> stageTo(tripId, cars[0])
+                else -> AlertDialog.Builder(this).setTitle("어느 차로 보낼까요?")
+                    .setItems(cars.map { it.second }.toTypedArray()) { _, which -> stageTo(tripId, cars[which]) }.show()
+            }
+        }
+    }
+
+    private fun stageTo(tripId: String, car: Pair<String, String>) {
+        remote({ api.stage(tripId, car.first) }) {
+            AlertDialog.Builder(this).setTitle("${car.second}에 보냈어요")
+                .setMessage("차량 앱이 받아 가면 출발 화면에 이 여행이 나타나요.").setPositiveButton("확인", null).show()
+        }
+    }
+
+    /** P12: the car's DriveEvents for the trip sent from this phone (GET /v1/trips/{id}/events). */
+    private fun refreshEvents() {
+        val tripId = serverTripId ?: return
+        if (signedInAs == null) return
+        remote({ api.events(tripId) }, quiet = true) { events ->
+            if (events.isEmpty() || events == driveEvents) return@remote
+            driveEvents.clear(); driveEvents.addAll(events)
+            if (screen == Screen.TIMELINE) render()
+        }
+    }
+
+    /** Runs [work] off the main thread and hands the result back on it; errors become a short message. */
+    private fun <T> remote(work: () -> T, quiet: Boolean = false, done: (T) -> Unit) {
+        Thread {
+            val result = runCatching(work)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess(done).onFailure { failure(it, quiet) }
+            }
+        }.start()
+    }
+
+    private fun failure(error: Throwable, quiet: Boolean) {
+        Log.w("ChagokApi", "Backend call failed", error)
+        when {
+            error is ApiError && error.status == 401 -> {
+                val wasSignedIn = signedInAs != null
+                session.edit().remove("token").apply()
+                message(if (wasSignedIn) "로그인이 만료됐어요. 다시 로그인해 주세요." else "이메일이나 비밀번호가 맞지 않아요."); render()
+            }
+            quiet -> Unit
+            error is ApiError && error.status == 429 -> message("요청이 많아요. ${error.retryAfter ?: 60}초 뒤에 다시 해 주세요.")
+            error is ApiError && error.status == 422 -> message("서버가 여행 내용을 받지 않았어요: ${error.message}")
+            error is ApiError -> message("서버 오류가 났어요 (${error.status}). 잠시 후 다시 해 주세요.")
+            else -> message("서버에 연결하지 못했어요. 인터넷 연결을 확인해 주세요.")
+        }
+    }
+
+    override fun onPause() { poller.removeCallbacks(pollEvents); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        if (screen == Screen.TIMELINE && signedInAs != null && serverTripId != null) { refreshEvents(); poller.postDelayed(pollEvents, 10_000) }
     }
 
     // ── P16 past trips ──────────────────────────────────────────────────────
@@ -1071,7 +1176,7 @@ class PhoneActivity : ScreenActivity() {
         out.putString("filter", filter); out.putString("photoTab", photoTab); out.putStringArrayList("selected", ArrayList(selectedPlaces))
         out.putIntegerArrayList("photos", ArrayList(selectedPhotos)); out.putIntegerArrayList("recorded", ArrayList(recordedPhotos))
         out.putStringArrayList("moments", ArrayList(moments)); out.putInt("recap", recapIndex)
-        out.putInt("past", pastIndex); out.putString("signedIn", signedInWith)
+        out.putInt("past", pastIndex)
         out.putStringArrayList("driveEvents", ArrayList(driveEvents.map { it.toJson() }))
         super.onSaveInstanceState(out)
     }
@@ -1081,7 +1186,7 @@ class PhoneActivity : ScreenActivity() {
         selectedPlaces.clear(); selectedPlaces.addAll(state.getStringArrayList("selected").orEmpty())
         selectedPhotos.addAll(state.getIntegerArrayList("photos").orEmpty()); recordedPhotos.addAll(state.getIntegerArrayList("recorded").orEmpty())
         moments.addAll(state.getStringArrayList("moments").orEmpty()); recapIndex = state.getInt("recap")
-        pastIndex = state.getInt("past"); signedInWith = state.getString("signedIn")
+        pastIndex = state.getInt("past")
         driveEvents.addAll(state.getStringArrayList("driveEvents").orEmpty().mapNotNull { runCatching { DriveEvent.fromJson(it) }.getOrNull() })
     }
 }

@@ -245,7 +245,7 @@ class PhoneActivity : ScreenActivity() {
         scrim.setBackgroundColor(Color.argb(214, 27, 38, 31)); scrim.setOnClickListener { closeFan() }
         val animate = shownScreen != Screen.START
         val items = listOf(
-            FanItem("새 여행", "새 여행 만들기, 목적지부터 5단계", R.drawable.ic_fan_trip) { leaveFanTo(Screen.DESTINATION) },
+            FanItem("새 여행", "새 여행 만들기, 목적지부터 5단계", R.drawable.ic_fan_trip) { newTrip(); leaveFanTo(Screen.DESTINATION) },
             FanItem("추천 장소", "추천 장소 보기, 유튜브에서 찾은 곳", R.drawable.ic_fan_reco) { leaveFanTo(Screen.RECOMMENDATIONS) },
             FanItem("지금 기록", "지금 이 장소 기록, 현재 위치로 근처 장소 찾기", R.drawable.ic_fan_pin) { leaveFanTo(Screen.TIMELINE); locateHere() },
             FanItem("기록 보기", "기록 보기", R.drawable.ic_fan_list) { leaveFanTo(Screen.TIMELINE) },
@@ -636,8 +636,10 @@ class PhoneActivity : ScreenActivity() {
         val located = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         tile("위치 사용", "'지금 이 장소 기록'을 누를 때만 써요", trailing = pill(if (located) "허용됨" else "꺼짐", if (located) pAccent else pMuted), gap = 20)
         put(label("연결", 12, pMuted), gap = 8)
-        tile("차량 연결", if (provider != null) "같은 계정으로 연결한 차량에 여행을 보내요" else "로그인하면 차량에 여행을 보낼 수 있어요",
-            trailing = pill(if (provider != null) "서버 연결" else "로그인 필요", if (provider != null) pAccent else pMuted), gap = 8)
+        tile("차량 연결", if (provider != null) "누르면 차에 넣을 8자리 번호가 나와요" else "로그인하면 차량에 여행을 보낼 수 있어요",
+            trailing = pill(if (provider != null) "번호 받기" else "로그인 필요", if (provider != null) pAccent else pMuted), gap = 8) {
+            if (provider == null) signIn() else pairCar()
+        }
         tile("유튜브 연결", "좋아요 · 재생목록 · 구독 채널에서 장소 찾기", trailing = pill("연동 예정", pMuted), gap = 20)
         put(label("계정", 12, pMuted), gap = 8)
         if (provider == null) tile("로그인", "팀에서 받은 차곡 계정(이메일)으로") { signIn() }
@@ -677,16 +679,28 @@ class PhoneActivity : ScreenActivity() {
             return
         }
         message("차량으로 보내는 중…")
-        remote({ api.saveTrip(serverTripId, draft, places) to api.pleosDevices() }) { (tripId, cars) ->
-            session.edit().putString("tripId", tripId).apply()
+        // Keep the tripId as soon as it exists: if the device list fails, a retry updates this trip instead of making another.
+        remote({ api.saveTrip(serverTripId, draft, places).also { session.edit().putString("tripId", it).apply() } to api.pleosDevices() }) { (tripId, cars) ->
             when (cars.size) {
                 0 -> AlertDialog.Builder(this).setTitle("연결된 차량이 없어요")
-                    .setMessage("여행은 서버에 저장했어요. 차량 앱에서 이 계정으로 기기를 연결하면 보낼 수 있어요.")
+                    .setMessage("여행은 서버에 저장했어요. MY → 차량 연결에서 받은 번호를 차에 넣으면 보낼 수 있어요.")
                     .setPositiveButton("확인", null).show()
                 1 -> stageTo(tripId, cars[0])
                 else -> AlertDialog.Builder(this).setTitle("어느 차로 보낼까요?")
                     .setItems(cars.map { it.second }.toTypedArray()) { _, which -> stageTo(tripId, cars[which]) }.show()
             }
+        }
+    }
+
+    /** A new trip gets its own server trip: forget the last one so 차로 보내기 doesn't overwrite it. */
+    private fun newTrip() { session.edit().remove("tripId").apply() }
+
+    /** MY → 차량 연결: an 8-digit code (5 minutes) to type into the car app's 폰과 연결하기 (POST /v1/pairings). */
+    private fun pairCar() {
+        remote({ api.pairingCode() }) { code ->
+            AlertDialog.Builder(this).setTitle("차에서 이 번호를 넣어 주세요")
+                .setMessage("${code.take(4)} ${code.drop(4)}\n\n차곡 차량 앱 → 기록 → 폰과 연결하기. 5분 안에 한 번만 쓸 수 있어요.")
+                .setPositiveButton("확인", null).show()
         }
     }
 
@@ -738,6 +752,7 @@ class PhoneActivity : ScreenActivity() {
     override fun onPause() { poller.removeCallbacks(pollEvents); super.onPause() }
     override fun onResume() {
         super.onResume()
+        poller.removeCallbacks(pollEvents) // render() in onCreate may have scheduled it already
         if (screen == Screen.TIMELINE && signedInAs != null && serverTripId != null) { refreshEvents(); poller.postDelayed(pollEvents, 10_000) }
     }
 
@@ -866,7 +881,7 @@ class PhoneActivity : ScreenActivity() {
         content.addView(card, lp(MATCH, resources.displayMetrics.heightPixels - dp(if (recapIndex == slides.lastIndex) 300 else 210)))
 
         if (recapIndex == slides.lastIndex) {
-            primary("새 여행 만들기") { navigate(Screen.DESTINATION) }
+            primary("새 여행 만들기") { newTrip(); navigate(Screen.DESTINATION) }
             textButton("처음부터 다시 보기", center = true, into = actions) { recapIndex = 0; render() }
         }
     }

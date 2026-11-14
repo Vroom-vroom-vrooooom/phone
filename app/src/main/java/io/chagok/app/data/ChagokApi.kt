@@ -4,6 +4,7 @@ import io.chagok.app.domain.DriveEvent
 import io.chagok.app.domain.Place
 import io.chagok.app.domain.TripDraft
 import io.chagok.app.domain.TripPlan
+import io.chagok.app.domain.toJson
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -60,6 +61,33 @@ class ChagokApi(private val baseUrl: String, private val token: () -> String?) {
         val all = arr(call("GET", "/v1/trips/${enc(tripId)}/events"))
         return (0 until all.length()).map { DriveEvent.fromJson(all.getJSONObject(it).toString()) }
     }
+
+    /** POST /v1/pairings (account login): an 8-digit code, valid 5 minutes, that the car types in. */
+    fun pairingCode(): String = obj(call("POST", "/v1/pairings")).getString("code")
+
+    // ── Pleos side (device token from [claim]) ──
+
+    /** POST /v1/pairings/claim, no login: this car's deviceId and device token (30 days). */
+    fun claim(code: String, name: String): Pair<String, String> =
+        obj(call("POST", "/v1/pairings/claim", JSONObject().put("code", code).put("name", name).put("kind", "pleos"), auth = false))
+            .let { it.getString("deviceId") to it.getString("access_token") }
+
+    /** One queued message: [kind] TripPlan | SpeakCommand, [payload] contract v1 JSON, [createdMs] when the server queued it. */
+    class Message(val kind: String, val payload: String, val createdMs: Long)
+
+    /** GET /v1/devices/{id}/messages: up to 100 messages after [cursor], and the cursor to keep once they are handled. */
+    fun messages(deviceId: String, cursor: String): Pair<List<Message>, String> {
+        val o = obj(call("GET", "/v1/devices/${enc(deviceId)}/messages?after=${enc(cursor)}"))
+        val all = o.getJSONArray("messages")
+        return (0 until all.length()).map { all.getJSONObject(it) }
+            .map { Message(it.getString("kind"), it.getJSONObject("payload").toString(), it.getLong("created") / 1_000_000) } to o.getString("nextCursor")
+    }
+
+    /** POST /v1/trips/{id}/places: a place found in the car (not in the plan), so events about it are accepted. */
+    fun addPlace(tripId: String, place: Place) { call("POST", "/v1/trips/${enc(tripId)}/places", place.toJson()) }
+
+    /** POST /v1/trips/{id}/events. The same payload twice is stored once. */
+    fun postEvent(event: DriveEvent) { call("POST", "/v1/trips/${enc(event.tripId)}/events", JSONObject(event.toJson())) }
 
     private fun call(method: String, path: String, body: JSONObject? = null, auth: Boolean = true): String {
         val connection = URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection

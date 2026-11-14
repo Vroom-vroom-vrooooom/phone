@@ -4,12 +4,14 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.DatePickerDialog
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.location.Geocoder
@@ -31,6 +33,8 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.inputmethod.EditorInfo
 import android.view.animation.OvershootInterpolator
 import android.widget.*
 import io.chagok.app.BuildConfig
@@ -366,9 +370,9 @@ class PhoneActivity : ScreenActivity() {
     private fun importVideos() {
         wizardHeader(5, "유튜브", "유튜브에서 찾아볼까요?", "본 영상 속 장소를 일정 후보로 모아요. 건너뛰어도 돼요")
         // YouTube Data API (OAuth) can read liked videos, own playlists and subscriptions; history only via Takeout.
-        tile("유튜브 연결", "좋아요한 영상 · 내 재생목록 · 구독 채널", icon = true, trailing = pill("연동 예정", pAccent), gap = 10) { integration(repository.importFrom("유튜브")) }
-        tile("링크 공유로 보내기", "유튜브나 다른 앱에서 공유 → 차곡", icon = true, trailing = pill("연동 예정", pMuted), gap = 10) { integration(repository.importFrom("공유 링크")) }
-        tile("유튜브 시청 기록 파일", "Google 테이크아웃에서 내려받은 파일", icon = true, trailing = pill("파일 · 예정", pMuted)) { integration(repository.importFrom("시청 기록 파일")) }
+        tile("유튜브 연결", "좋아요한 영상 · 내 재생목록 · 구독 채널", icon = true, trailing = pill("연동 예정", pAccent), gap = 10) { soon(repository.importFrom("유튜브")) }
+        tile("링크 공유로 보내기", "유튜브나 다른 앱에서 공유 → 차곡", icon = true, trailing = pill("연동 예정", pMuted), gap = 10) { soon(repository.importFrom("공유 링크")) }
+        tile("유튜브 시청 기록 파일", "Google 테이크아웃에서 내려받은 파일", icon = true, trailing = pill("파일 · 예정", pMuted)) { soon(repository.importFrom("시청 기록 파일")) }
         put(label("시청 기록과 '나중에 볼 동영상'은 유튜브가 앱에 열어 주지 않아 파일로만 가져올 수 있어요.", 12, pMuted))
         primary("장소 찾기") { navigate(Screen.RECOMMENDATIONS) }
         textButton("건너뛰기", into = actions) { navigate(Screen.ITINERARY) }
@@ -397,20 +401,13 @@ class PhoneActivity : ScreenActivity() {
         val places = itineraryPlaces()
         if (places.isEmpty()) put(label("담은 장소가 없어요. 추천에서 골라 주세요.", 14, pMuted))
         else timelineCard(places.mapIndexed { index, place ->
-            TimeRow(place.time, place.name, sub = place.open.ifEmpty { null }, right = place.duration, onLong = { reorder(index, place) },
-                description = listOf("${index + 1}번째 ${place.name}", place.time, place.duration, place.open).filter(String::isNotEmpty).joinToString(", ") + ". 길게 눌러 순서 바꾸기")
-        }, meta = "길게 눌러 순서 바꾸기", tag = draft.mood, foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "))
+            TimeRow(place.time, place.name, sub = place.open.ifEmpty { null }, right = place.duration,
+                description = listOf("${index + 1}번째 ${place.name}", place.time, place.duration, place.open).filter(String::isNotEmpty).joinToString(", "))
+        }, meta = "≡ 를 끌어서 순서 바꾸기", tag = draft.mood, onMove = { from, to -> val id = itineraryIds.removeAt(from); itineraryIds.add(to, id); render() }, foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "))
         tile("사이에 들를 곳 더 찾기", "동선 근처 장소를 제안해요", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
         primary("차로 보내기") {
             if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else sendToCar(places)
         }
-    }
-
-    private fun reorder(index: Int, place: Place) {
-        AlertDialog.Builder(this).setTitle(place.name).setItems(arrayOf("위로 이동", "아래로 이동")) { _, action ->
-            val target = if (action == 0) index - 1 else index + 1
-            if (target in itineraryIds.indices) { val id = itineraryIds.removeAt(index); itineraryIds.add(target, id); render() }
-        }.show()
     }
 
     // ── P10–P13 · record ────────────────────────────────────────────────────
@@ -604,6 +601,7 @@ class PhoneActivity : ScreenActivity() {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(18)); background = cardBg(); lift(this)
         }
         val provider = signedInAs
+        if (provider == null) profile.apply { isClickable = true; isFocusable = true; foreground = ripple(22f); contentDescription = "로그인하기"; setOnClickListener { signIn() } }
         profile.addView(label(if (provider != null) provider.first().uppercase() else "?", 22, pAccent, bold = true).apply { gravity = Gravity.CENTER; background = oval(pAccentSoft) },
             lp(dp(60), dp(60)).apply { marginEnd = dp(14) })
         profile.addView(LinearLayout(this).apply {
@@ -611,9 +609,10 @@ class PhoneActivity : ScreenActivity() {
             if (provider != null) {
                 addView(label("차곡 여행자", 19, pInk, bold = true)); addView(label(provider, 13, pMuted))
             } else {
-                addView(label("로그인하지 않았어요", 17, pInk, bold = true)); addView(label("로그인하면 다른 기기에서도 기록을 볼 수 있어요", 13, pMuted))
+                addView(label("로그인하지 않았어요", 17, pInk, bold = true)); addView(label("눌러서 로그인하면 차로 여행을 보낼 수 있어요", 13, pMuted))
             }
         }, lp(0, WRAP, 1f))
+        if (provider == null) profile.addView(label("›", 26, pMuted))
         put(profile, gap = 16)
         // One entry point to the past: every trip, one at a time, with its map, places, dates and photos.
         val past = LinearLayout(this).apply {
@@ -622,7 +621,7 @@ class PhoneActivity : ScreenActivity() {
             contentDescription = "지난 여행 돌아보기, 여행 ${pastTrips.size}개"
             setOnClickListener { showPast(0, push = true) }
         }
-        past.addView(orb(), lp(dp(48), dp(48)).apply { marginEnd = dp(14) })
+        past.addView(orb(badge = true), lp(dp(48), dp(48)).apply { marginEnd = dp(14) })
         past.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(label("지난 여행 돌아보기", 17, Color.WHITE, bold = true))
@@ -641,53 +640,60 @@ class PhoneActivity : ScreenActivity() {
             if (provider == null) signIn() else pairCar()
         }
         tile("유튜브 연결", "좋아요 · 재생목록 · 구독 채널에서 장소 찾기", trailing = pill("연동 예정", pMuted), gap = 20)
-        put(label("계정", 12, pMuted), gap = 8)
-        if (provider == null) tile("로그인", "팀에서 받은 차곡 계정(이메일)으로") { signIn() }
-        else tile("로그아웃", "$provider 에서 나가기") { signOut() }
+        if (provider != null) { put(label("계정", 12, pMuted), gap = 8); tile("로그아웃", "$provider 에서 나가기") { signOut() } }
     }
 
     /** Email/password login (POST /v1/auth/login). Accounts are made by the team admin; the app never registers. */
     private fun signIn() {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(8), dp(22), 0) }
-        val email = EditText(this).apply { hint = "이메일"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS; setSingleLine(true) }
-        val password = EditText(this).apply { hint = "비밀번호 (12자 이상)"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD; setSingleLine(true) }
-        box.addView(email, lp(MATCH, WRAP)); box.addView(password, lp(MATCH, WRAP))
-        box.addView(label("계정은 팀 관리자가 만들어 줘요.", 12, pMuted), lp(MATCH, WRAP).apply { topMargin = dp(6) })
-        AlertDialog.Builder(this).setTitle("차곡 로그인").setView(box).setNegativeButton("취소", null)
-            .setPositiveButton("로그인") { _, _ ->
-                val id = email.text.toString().trim(); val secret = password.text.toString()
-                if (id.isEmpty() || secret.length < 12) { message("이메일과 12자 이상 비밀번호를 입력해 주세요."); return@setPositiveButton }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val email = field("이메일", password = false)
+        val password = field("비밀번호 (12자 이상)", password = true).apply { imeOptions = EditorInfo.IME_ACTION_DONE }
+        val error = label("", 13, pAccent).apply { visibility = View.GONE }
+        box.addView(email, lp(MATCH, dp(54))); box.addView(password, lp(MATCH, dp(54)).apply { topMargin = dp(10) })
+        box.addView(error, lp(MATCH, WRAP).apply { topMargin = dp(10) })
+        val submit = { d: Dialog ->
+            val id = email.text.toString().trim(); val secret = password.text.toString()
+            if (id.isEmpty() || secret.length < 12) { error.text = "이메일과 12자 이상 비밀번호를 입력해 주세요."; error.visibility = View.VISIBLE }
+            else {
+                error.visibility = View.GONE
                 remote({ api.login(id, secret) }) { token ->
                     session.edit().putString("token", token).putString("email", id).apply()
-                    message("로그인했어요."); render()
+                    d.dismiss(); message("로그인했어요."); render()
                 }
-            }.show()
+            }
+        }
+        val dialog = popup("로그인", "팀에서 받은 이메일 계정으로 로그인해요. 로그인하면 차로 여행을 보낼 수 있어요.", box, primary = "로그인", secondary = "취소", logo = true, onPrimary = submit)
+        password.setOnEditorActionListener { _, action, _ -> (action == EditorInfo.IME_ACTION_DONE).also { if (it) submit(dialog) } }
     }
 
     private fun signOut() {
-        AlertDialog.Builder(this).setTitle("로그아웃할까요?").setMessage("이 휴대폰에 남긴 기록은 그대로 있어요.")
-            .setPositiveButton("로그아웃") { _, _ -> session.edit().clear().apply(); render() }.setNegativeButton("취소", null).show()
+        popup("로그아웃할까요?", "이 휴대폰에 남긴 기록은 그대로 있어요.", primary = "로그아웃", secondary = "취소") { session.edit().clear().apply(); it.dismiss(); render() }
     }
 
     /**
      * P09 "차로 보내기". Signed in: save the trip (POST/PUT /v1/trips) → pick the account's Pleos device → queue the
-     * TripPlan (/stage). Signed out: the local demo (logcat + dialog) as before, for the adb relay.
+     * TripPlan (/stage). Signed out: nothing can reach the car yet, so say so (the TripPlan still goes to logcat for relay.sh).
      */
     private fun sendToCar(places: List<Place>) {
         if (signedInAs == null) {
-            integration(repository.stageTrip(draft, places)); message("로그인하면 차량으로 실제로 보낼 수 있어요.")
+            repository.stageTrip(draft, places) // logcat only, for the adb relay demo
+            popup("아직 차와 연결되지 않았어요", "로그인하고 MY → 차량 연결에서 받은 번호를 차곡 차량 앱에 넣으면 여행을 보낼 수 있어요.",
+                primary = "로그인하기", secondary = "닫기") { it.dismiss(); signIn() }
             return
         }
         message("차량으로 보내는 중…")
         // Keep the tripId as soon as it exists: if the device list fails, a retry updates this trip instead of making another.
         remote({ api.saveTrip(serverTripId, draft, places).also { session.edit().putString("tripId", it).apply() } to api.pleosDevices() }) { (tripId, cars) ->
             when (cars.size) {
-                0 -> AlertDialog.Builder(this).setTitle("연결된 차량이 없어요")
-                    .setMessage("여행은 서버에 저장했어요. MY → 차량 연결에서 받은 번호를 차에 넣으면 보낼 수 있어요.")
-                    .setPositiveButton("확인", null).show()
+                0 -> popup("아직 차와 연결되지 않았어요", "여행은 저장해 뒀어요. 번호를 받아 차곡 차량 앱 → 프로필 → 폰과 연결하기에 넣으면 바로 보낼 수 있어요.",
+                    primary = "번호 받기", secondary = "닫기") { it.dismiss(); pairCar() }
                 1 -> stageTo(tripId, cars[0])
-                else -> AlertDialog.Builder(this).setTitle("어느 차로 보낼까요?")
-                    .setItems(cars.map { it.second }.toTypedArray()) { _, which -> stageTo(tripId, cars[which]) }.show()
+                else -> {
+                    val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                    var dialog: Dialog? = null
+                    cars.forEach { car -> tile(car.second, "Pleos", trailing = label("›", 22, pMuted), gap = 8, into = list) { dialog?.dismiss(); stageTo(tripId, car) } }
+                    dialog = popup("어느 차로 보낼까요?", null, list, primary = null, secondary = "취소")
+                }
             }
         }
     }
@@ -698,16 +704,17 @@ class PhoneActivity : ScreenActivity() {
     /** MY → 차량 연결: an 8-digit code (5 minutes) to type into the car app's 폰과 연결하기 (POST /v1/pairings). */
     private fun pairCar() {
         remote({ api.pairingCode() }) { code ->
-            AlertDialog.Builder(this).setTitle("차에서 이 번호를 넣어 주세요")
-                .setMessage("${code.take(4)} ${code.drop(4)}\n\n차곡 차량 앱 → 기록 → 폰과 연결하기. 5분 안에 한 번만 쓸 수 있어요.")
-                .setPositiveButton("확인", null).show()
+            val number = label("${code.take(4)} ${code.drop(4)}", 38, pAccent, bold = true).apply {
+                gravity = Gravity.CENTER; letterSpacing = .12f; fontFeatureSettings = "tnum"; background = shape(pAccentSoft, null, 20f); setPadding(0, dp(16), 0, dp(16))
+                contentDescription = "연결 번호 ${code.toList().joinToString(" ")}"
+            }
+            popup("차에 이 번호를 넣어 주세요", "차곡 차량 앱 → 프로필 → 폰과 연결하기. 5분 안에 한 번만 쓸 수 있어요.", number)
         }
     }
 
     private fun stageTo(tripId: String, car: Pair<String, String>) {
         remote({ api.stage(tripId, car.first) }) {
-            AlertDialog.Builder(this).setTitle("${car.second}에 보냈어요")
-                .setMessage("차량 앱이 받아 가면 출발 화면에 이 여행이 나타나요.").setPositiveButton("확인", null).show()
+            popup("${car.second}에 보냈어요", "차가 받으면 차곡 차량 앱의 오늘 일정에 이 여행이 떠요.")
         }
     }
 
@@ -1053,16 +1060,15 @@ class PhoneActivity : ScreenActivity() {
         setPadding(dp(10), dp(3), dp(10), dp(3)); background = shape(if (color == pAccent) pAccentSoft else pFill, null, 999f)
     }
 
-    private class TimeRow(
-        val time: String, val title: String, val sub: String? = null, val right: String? = null,
-        val onLong: (() -> Unit)? = null, val description: String? = null,
-    )
+    private class TimeRow(val time: String, val title: String, val sub: String? = null, val right: String? = null, val description: String? = null)
 
     /**
      * Trip card of the car start screen (bg_trip_card + routeRow): meta + mood tag, then time (15sp) · rail with an 11dp dot ·
      * place (18sp medium) · note (14sp); middle dots deep, the last one pale; hairline and a foot line when given.
      */
-    private fun timelineCard(rows: List<TimeRow>, meta: String? = null, tag: String? = null, foot: String? = null, onClick: (() -> Unit)? = null): LinearLayout {
+    private fun timelineCard(rows: List<TimeRow>, meta: String? = null, tag: String? = null, foot: String? = null,
+                             onMove: ((from: Int, to: Int) -> Unit)? = null, onClick: (() -> Unit)? = null): LinearLayout {
+        val rowViews = mutableListOf<View>()
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(18), dp(20), dp(15)); background = cardBg(); lift(this)
             if (onClick != null) { isClickable = true; foreground = ripple(22f); setOnClickListener { onClick() } }
@@ -1075,12 +1081,9 @@ class PhoneActivity : ScreenActivity() {
             val last = i == rows.lastIndex
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(40)
-                r.onLong?.let { long ->
-                    isLongClickable = true; isClickable = true; foreground = ripple(12f)
-                    setOnClickListener { message("길게 누르면 순서를 바꿀 수 있어요.") }; setOnLongClickListener { long(); true }
-                }
                 contentDescription = r.description ?: listOfNotNull(r.time, r.title, r.sub, r.right).joinToString(", ")
             }
+            rowViews += row
             row.addView(label(r.time, 15, pMuted).apply { fontFeatureSettings = "tnum" }, lp(dp(59), WRAP))
             row.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
@@ -1093,6 +1096,7 @@ class PhoneActivity : ScreenActivity() {
                 addView(label(r.title, if (r.sub == null) 18 else 17, pInk, medium = true)); r.sub?.let { addView(label(it, 13, pMuted)) }
             }, lp(0, WRAP, 1f))
             r.right?.let { row.addView(label(it, 14, pMuted)) }
+            if (onMove != null && rows.size > 1) dragHandle(row, i, rowViews, rows.lastIndex, onMove)
             card.addView(row, lp(MATCH, WRAP))
         }
         if (foot != null) {
@@ -1103,8 +1107,90 @@ class PhoneActivity : ScreenActivity() {
         return card
     }
 
-    /** The pastel orb of the car app (CompanionOrbView, copied from pleos), as a still mark: no tap, not announced. */
-    private fun orb() = CompanionOrbView(this).apply { isClickable = false; isFocusable = false; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+    /**
+     * Drag to reorder: press ≡ and move; the row follows the finger and the rows it passes slide out of the way.
+     * TalkBack gets 위로/아래로 이동 actions instead, since a drag can't be done by swipes.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun dragHandle(row: LinearLayout, index: Int, rowViews: List<View>, last: Int, reorder: (Int, Int) -> Unit) {
+        var startY = 0f; var target = index
+        // Rebuild after the touch/accessibility event is done: render() inside it removes the views still being dispatched (crash).
+        val onMove = { from: Int, to: Int -> rowViews.forEach { it.animate().cancel() }; window.decorView.post { reorder(from, to) }; Unit }
+        row.addView(label("≡", 22, pMuted).apply {
+            gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            setOnTouchListener { handle, e ->
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        handle.parent.requestDisallowInterceptTouchEvent(true) // keep the page from scrolling
+                        startY = e.rawY; target = index
+                        row.background = shape(pSurface, null, 14f); row.elevation = dpf(10f); row.animate().scaleX(1.02f).scaleY(1.02f).setDuration(120).start()
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dy = e.rawY - startY; val h = row.height.toFloat()
+                        row.translationY = dy
+                        target = (index + Math.round(dy / h)).coerceIn(0, last)
+                        rowViews.forEachIndexed { j, other ->
+                            if (j != index) other.animate().translationY(when { j in index + 1..target -> -h; j in target until index -> h; else -> 0f }).setDuration(120).start()
+                        }
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        if (target != index) onMove(index, target)
+                        else { row.animate().translationY(0f).scaleX(1f).scaleY(1f).setDuration(120).start(); row.elevation = 0f; row.background = null }
+                    }
+                }
+                true
+            }
+        }, lp(dp(44), dp(44)).apply { marginStart = dp(4) })
+        row.accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                if (index > 0) info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.move_up, "위로 이동"))
+                if (index < last) info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.move_down, "아래로 이동"))
+            }
+            override fun performAccessibilityAction(host: View, action: Int, args: Bundle?) = when (action) {
+                R.id.move_up -> { onMove(index, index - 1); true }
+                R.id.move_down -> { onMove(index, index + 1); true }
+                else -> super.performAccessibilityAction(host, action, args)
+            }
+        }
+    }
+
+    /**
+     * Chagok popup (replaces the system AlertDialog): white card, 28dp corners, title + text, optional [extra] view,
+     * then a deep primary pill and a quiet secondary one. [onPrimary] gets the dialog so it can stay open (form errors).
+     */
+    private fun popup(title: String, body: CharSequence? = null, extra: View? = null, primary: String? = "확인", secondary: String? = null,
+                      logo: Boolean = false, onPrimary: (Dialog) -> Unit = { it.dismiss() }): Dialog {
+        val dialog = Dialog(this)
+        val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(26), dp(24), dp(18)); background = shape(pSurface, null, 28f) }
+        // Logo guide: login uses the vertical lockup (symbol + 차곡 + CHAGOK), at least 96px tall.
+        if (logo) card.addView(ImageView(this).apply { setImageResource(R.drawable.logo_vertical); contentDescription = "차곡" },
+            lp(MATCH, dp(104)).apply { bottomMargin = dp(20); topMargin = dp(6) })
+        card.addView(label(title, 20, pInk, bold = true).apply { if (logo) gravity = Gravity.CENTER }, lp(MATCH, WRAP))
+        body?.let { card.addView(TextView(this).apply { text = it; textSize = 15f; setTextColor(pMuted); setLineSpacing(dp(3).toFloat(), 1f) }, lp(MATCH, WRAP).apply { topMargin = dp(8) }) }
+        extra?.let { card.addView(it, lp(MATCH, WRAP).apply { topMargin = dp(18) }) }
+        primary?.let { card.addView(actionButton(it, primary = true) { onPrimary(dialog) }, lp(MATCH, dp(54)).apply { topMargin = dp(22) }) }
+        secondary?.let { card.addView(actionButton(it, primary = false) { dialog.dismiss() }.apply { background = null; setTextColor(pMuted) }, lp(MATCH, dp(48)).apply { topMargin = dp(4) }) }
+        dialog.setContentView(card)
+        dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setLayout(resources.displayMetrics.widthPixels - dp(40), ViewGroup.LayoutParams.WRAP_CONTENT) }
+        dialog.show()
+        return dialog
+    }
+
+    /** Not connected yet (YouTube import etc.): same popup instead of the shared "데모 · 연동 전" alert. */
+    private fun soon(result: IntegrationResult) = popup("곧 연결돼요", when (result) { is IntegrationResult.Demo -> result.message; is IntegrationResult.Unavailable -> result.message })
+
+    private fun field(hint: String, password: Boolean) = EditText(this).apply {
+        this.hint = hint; setHintTextColor(pMuted); setTextColor(pInk); textSize = 16f; setSingleLine(true)
+        inputType = InputType.TYPE_CLASS_TEXT or if (password) InputType.TYPE_TEXT_VARIATION_PASSWORD else InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+        background = shape(pFill, null, 16f); setPadding(dp(18), 0, dp(18), 0); minHeight = dp(54)
+    }
+
+    /** 차곡 R4 symbol (logo kit 차곡.zip) as a still mark: not announced. [badge] = on a white disc, for dark surfaces. */
+    private fun orb(badge: Boolean = false) = ImageView(this).apply {
+        setImageResource(R.drawable.logo_symbol); scaleType = ImageView.ScaleType.FIT_CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        if (badge) { background = oval(Color.WHITE); setPadding(dp(9), dp(9), dp(9), dp(9)) }
+    }
 
     private fun emphasize(parts: List<Pair<String, Boolean>>) = SpannableStringBuilder().apply {
         parts.forEach { (text, strong) ->

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TalkBack actions for reordering the itinerary (the drag handle has no swipe equivalent). -->
+    <item name="move_up" type="id" />
+    <item name="move_down" type="id" />
+</resources>

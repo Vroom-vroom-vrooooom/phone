@@ -27,7 +27,11 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
-import android.view.GestureDetector
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
+import android.view.VelocityTracker
+import android.view.ViewConfiguration
 import android.view.MotionEvent
 import android.util.Log
 import android.view.Gravity
@@ -35,6 +39,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.EditorInfo
+import android.view.HapticFeedbackConstants
+import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.widget.*
 import io.chagok.app.BuildConfig
@@ -50,6 +56,9 @@ import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import java.util.UUID
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -101,7 +110,14 @@ class PhoneActivity : ScreenActivity() {
     private val pDot by lazy { getColor(R.color.phone_dot) }
     private val pRail by lazy { getColor(R.color.phone_rail) }
     private val shadow = Color.rgb(60, 70, 50)
-    private lateinit var swipe: GestureDetector
+    // P16 page swipe: where the finger went down, whether this touch became a sideways drag, its speed.
+    private var swipeX = 0f
+    private var swipeY = 0f
+    private var swiping = false
+    private var velocity: VelocityTracker? = null
+    private var pastPager: FrameLayout? = null // P16: the moving part under the fixed header; current trip + neighbours while turning
+    private var pastTurn: ValueAnimator? = null
+    private var summaryPast: Int? = null // 여행 요약 of a past trip (P16) instead of the current one
 
     /** Screens that show the floating + button; the 5-step setup, arrival, photo picker and recap are full-screen flows. */
     private val plusScreens = setOf(Screen.HOME, Screen.START, Screen.RECOMMENDATIONS, Screen.ITINERARY, Screen.TIMELINE, Screen.SUMMARY, Screen.MY)
@@ -115,19 +131,87 @@ class PhoneActivity : ScreenActivity() {
             orientation = GradientDrawable.Orientation.TOP_BOTTOM
             colors = intArrayOf(getColor(R.color.phone_bg_top), getColor(R.color.phone_bg_mid), getColor(R.color.phone_bg_bottom))
         }
-        swipe = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
-                if (screen != Screen.PAST || e1 == null || kotlin.math.abs(vx) < kotlin.math.abs(vy) * 1.5f || kotlin.math.abs(e2.x - e1.x) < dp(80)) return false
-                showPast(pastIndex + if (vx < 0) 1 else -1); return true
-            }
-        })
-        if (state == null) receive(intent)
+        if (state == null) { restoreSavedTrip(); render(); receive(intent) }
     }
 
-    /** Sideways swipe on P16 flips between past trips; cards and buttons still get their own taps. */
-    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        if (screen == Screen.PAST && ::swipe.isInitialized && swipe.onTouchEvent(event)) return true
-        return super.dispatchTouchEvent(event)
+    /**
+     * P16 page swipe. The header (이전 · 지난 여행 돌아보기 · n / N · dots) stays; only the trip below moves. When the touch turns
+     * sideways the previous and next trips are built next to it, so they slide in attached — no empty gap. Let go past a quarter
+     * of the width or with a flick and it turns (settlePast), otherwise it springs back; rubber band at the first/last trip.
+     * Vertical scrolling and taps work as usual until the touch is clearly sideways; then the children get a cancel.
+     */
+    override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        val pager = pastPager
+        if (screen != Screen.PAST || pager == null) return super.dispatchTouchEvent(e)
+        if (pastTurn?.isRunning == true) return true // let the page finish turning
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+            swipeX = e.rawX; swipeY = e.rawY; swiping = false
+            velocity?.recycle(); velocity = VelocityTracker.obtain()
+        }
+        velocity?.addMovement(e)
+        val dx = e.rawX - swipeX; val dy = e.rawY - swipeY
+        if (!swiping && e.actionMasked == MotionEvent.ACTION_MOVE && kotlin.math.abs(dx) > ViewConfiguration.get(this).scaledTouchSlop * 2 && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f) {
+            swiping = true
+            MotionEvent.obtain(e).apply { action = MotionEvent.ACTION_CANCEL; super.dispatchTouchEvent(this); recycle() }
+            pastNeighbours(pager)
+        }
+        if (!swiping) return super.dispatchTouchEvent(e)
+        val edge = (dx > 0 && pastIndex == 0) || (dx < 0 && pastIndex == pastTrips.lastIndex)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_MOVE -> slidePast(pager, if (edge) dx / 3 else dx)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                velocity?.computeCurrentVelocity(1000)
+                val vx = velocity?.xVelocity ?: 0f
+                val flick = kotlin.math.abs(vx) > dp(700) && (vx < 0) == (dx < 0)
+                val turn = !edge && e.actionMasked == MotionEvent.ACTION_UP && (kotlin.math.abs(dx) > pager.width / 4f || flick)
+                settlePast(pager, if (turn) (if (dx < 0) 1 else -1) else 0)
+                velocity?.recycle(); velocity = null; swiping = false
+            }
+        }
+        return true
+    }
+
+    /** Distance between two trip pages: one page plus a 24dp gap. */
+    private fun pastSpan(pager: View) = pager.width + dp(24).toFloat()
+
+    /** Builds the previous/next trip beside the current one (tag = −1 / +1), lined up with what is on screen now. */
+    private fun pastNeighbours(pager: FrameLayout) {
+        if (pager.childCount > 1) return
+        val y = (findViewById<ScrollView>(R.id.screen_scroll).scrollY - pager.top).coerceAtLeast(0).toFloat()
+        listOf(-1, 1).forEach { step ->
+            val i = pastIndex + step
+            if (i in pastTrips.indices) pager.addView(pastPage(i).apply { tag = step; translationY = y; translationX = step * pastSpan(pager) }, FrameLayout.LayoutParams(MATCH, WRAP))
+        }
+    }
+
+    private fun slidePast(pager: FrameLayout, dx: Float) {
+        for (i in 0 until pager.childCount) pager.getChildAt(i).let { it.translationX = dx + ((it.tag as? Int) ?: 0) * pastSpan(pager) }
+    }
+
+    /**
+     * Finish a turn: [step] −1 / +1 slides the neighbour into place, 0 springs back. After a turn the screen is rebuilt for the
+     * new trip (in the animator callback, not inside touch dispatch) and scrolled so the page stays exactly where it was seen.
+     * With animations off in the system settings the animator ends at once.
+     */
+    private fun settlePast(pager: FrameLayout, step: Int) {
+        if (step != 0 && pastIndex + step !in pastTrips.indices) return
+        pastNeighbours(pager)
+        val current = (0 until pager.childCount).map(pager::getChildAt).first { it.tag == null }
+        pastTurn = ValueAnimator.ofFloat(current.translationX, -step * pastSpan(pager)).apply {
+            duration = if (step == 0) 220 else 260
+            interpolator = DecelerateInterpolator(1.4f)
+            addUpdateListener { slidePast(pager, it.animatedValue as Float) }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (isDestroyed || pastPager !== pager) return
+                    if (step == 0) { (0 until pager.childCount).map(pager::getChildAt).filter { it.tag != null }.forEach(pager::removeView); return }
+                    val scroll = findViewById<ScrollView>(R.id.screen_scroll)
+                    val keep = minOf(scroll.scrollY, pager.top)
+                    pastIndex += step; render(); scroll.scrollTo(0, keep)
+                }
+            })
+            start()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -151,6 +235,7 @@ class PhoneActivity : ScreenActivity() {
 
     override fun render() {
         content = findViewById(R.id.screen_content); content.removeAllViews()
+        content.clipChildren = true; pastPager = null // P16 turns its pages across the side padding (see past())
         actions = findViewById(R.id.bottom_action); actions.removeAllViews(); actions.visibility = View.GONE
         findViewById<View>(R.id.sheet_overlay).visibility = View.GONE
         title = "${screen.board} ${screen.title}"
@@ -200,17 +285,16 @@ class PhoneActivity : ScreenActivity() {
         val places = itineraryPlaces()
         timelineCard(places.map { TimeRow(it.time, it.name, right = it.duration) },
             meta = "${dateLabel(draft.departure)} · ${withWho()}", tag = draft.mood,
-            foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  ")) { navigate(Screen.ITINERARY) }
-            .contentDescription = "${tripName()}, ${dateLabel(draft.departure)}, 장소 ${places.size}곳. 일정 보기"
+            foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "), action = "일정 바꾸기 ›") { navigate(Screen.ITINERARY) }
+            .contentDescription = "${tripName()}, ${dateLabel(draft.departure)}, 장소 ${places.size}곳. 눌러서 일정 바꾸기"
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        buttons.addView(actionButton("일정 바꾸기", primary = false) { navigate(Screen.ITINERARY) }, lp(0, dp(58), 1f))
+        buttons.addView(actionButton("다른 여행 고르기", primary = false) { pickTrip() }, lp(0, dp(58), 1f))
         buttons.addView(actionButton("차로 보내기", primary = true) {
             if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else sendToCar(places)
         }, lp(0, dp(58), 1.8f).apply { marginStart = dp(9) })
         put(buttons, gap = 26)
         tile("유튜브에서 본 곳으로 다음 여행 찾기", "좋아요 · 재생목록 · 구독 채널", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
         tile("이번 여행 기록", "${draft.destination} · 남긴 장소 ${2 + moments.size}곳") { navigate(Screen.TIMELINE) }
-        tile("지난 여행 돌아보기", "여행 ${pastTrips.size}개 · 날짜 · 장소 · 사진") { showPast(0, push = true) }
     }
 
     /** Car start line ("오늘은 속초로\n떠나는 날이에요"), counted down on the phone before the day. */
@@ -403,11 +487,15 @@ class PhoneActivity : ScreenActivity() {
         else timelineCard(places.mapIndexed { index, place ->
             TimeRow(place.time, place.name, sub = place.open.ifEmpty { null }, right = place.duration,
                 description = listOf("${index + 1}번째 ${place.name}", place.time, place.duration, place.open).filter(String::isNotEmpty).joinToString(", "))
-        }, meta = "≡ 를 끌어서 순서 바꾸기", tag = draft.mood, onMove = { from, to -> val id = itineraryIds.removeAt(from); itineraryIds.add(to, id); render() }, foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "))
+        }, meta = "≡ 를 끌어서 순서 바꾸기", tag = draft.mood, onMove = { from, to -> val id = itineraryIds.removeAt(from); itineraryIds.add(to, id) }, foot = (listOf("${places.size}곳 들러요") + draft.interests).joinToString("  ·  "))
         tile("사이에 들를 곳 더 찾기", "동선 근처 장소를 제안해요", dashed = true) { navigate(Screen.RECOMMENDATIONS) }
-        primary("차로 보내기") {
-            if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else sendToCar(places)
-        }
+        actions.visibility = View.VISIBLE
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        buttons.addView(actionButton("저장하기", primary = false) { if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else saveTrip(itineraryPlaces()) },
+            lp(0, dp(58), 1f).apply { marginEnd = dp(9) })
+        buttons.addView(actionButton("차로 보내기", primary = true) { if (places.isEmpty()) message("일정에 장소를 먼저 담아 주세요.") else sendToCar(itineraryPlaces()) },
+            lp(0, dp(58), 1.4f))
+        actions.addView(buttons, lp(MATCH, WRAP).apply { setMargins(dp(2), dp(4), dp(2), dp(4)) })
     }
 
     // ── P10–P13 · record ────────────────────────────────────────────────────
@@ -474,7 +562,7 @@ class PhoneActivity : ScreenActivity() {
         tile("초당 순두부 거리", "12:34 · 사진 ${recordedPhotos.size} · 예시", gap = 10) { navigate(Screen.PHOTOS) }
         moments.forEach { m -> val (name, detail) = m.split('\u0001', limit = 2).let { it[0] to it.getOrElse(1) { "" } }; tile(name, detail, trailing = pill("내 기록", pAccent), gap = 10) }
         hereSuggestion()
-        textButton("여행 요약 보기 ›") { navigate(Screen.SUMMARY) }
+        textButton("여행 요약 보기 ›") { summaryPast = null; navigate(Screen.SUMMARY) }
         textButton("도착 알림 예시 보기 ›") { navigate(Screen.ARRIVAL) }
     }
 
@@ -570,10 +658,15 @@ class PhoneActivity : ScreenActivity() {
         space(4)
     }
 
+    /** P13 여행 요약 — of this trip, or of a past one when opened from 지난 여행 돌아보기 (summaryPast). */
     private fun summary() {
-        pageHeader("여행 요약", sub = "${draft.destination} ${tripLength()}")
+        val past = summaryPast?.let { pastTrips.getOrNull(it) }
         val approved = driveEvents.filter { it.type == DriveEvent.Type.WAYPOINT_APPROVED }.mapNotNull { it.placeId }.filter { it !in itineraryIds }.distinct()
-        val stats = listOf("214km" to "이동 거리", "${itineraryIds.size + approved.size}곳" to "들른 장소", "${3 + recordedPhotos.size}장" to "사진", "2개" to "들은 이야기")
+        val stops = past?.stops?.map { it.name } ?: (itineraryPlaces().map { it.name } + approved.map(::placeName))
+        val photos = past?.stops?.sumOf { it.photos } ?: (3 + recordedPhotos.size)
+        pageHeader(if (past != null) "${past.title} 요약" else "여행 요약", sub = past?.let { "${it.dates} · ${it.region}" } ?: "${draft.destination} ${tripLength()}")
+        val stats = if (past != null) listOf("${past.km}km" to "이동 거리", "${stops.size}곳" to "들른 장소", "${photos}장" to "사진", past.who to "함께")
+            else listOf("214km" to "이동 거리", "${stops.size}곳" to "들른 장소", "${photos}장" to "사진", "2개" to "들은 이야기")
         stats.chunked(2).forEach { pair ->
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             pair.forEachIndexed { i, (value, name) ->
@@ -584,13 +677,49 @@ class PhoneActivity : ScreenActivity() {
             }
             put(row, gap = 10)
         }
-        put(label("이동 거리와 들은 이야기 수는 예시예요.", 12, pMuted))
-        tile("여행 영상", "한 번에 짧은 영상으로", icon = true, gap = 10) { message("영상 생성은 다음 구현 단계예요.") }
-        tile("여행 책자", "경로 + 사진 + 메모, 사진 5장부터", icon = true, gap = 10) {
-            message(if (3 + recordedPhotos.size < 5) "사진을 5장 이상 담아 주세요." else "책자 생성은 다음 구현 단계예요.")
+        past?.stops?.maxByOrNull { it.photos }?.let { best ->
+            put(label("${past.region}에서 ${stops.size}곳을 들렀어요. 사진을 가장 많이 남긴 곳은 ${best.name}(${best.photos}장)이에요.", 15, pInk, medium = true).apply {
+                setPadding(dp(18), dp(16), dp(18), dp(16)); background = shape(pAccentSoft, null, 20f)
+            })
         }
-        tile("공개 범위", null, trailing = label(visibilityLabel(), 13, pMuted)) { navigate(Screen.DESTINATION) }
+        put(label(if (past != null) "지난 여행 기록은 예시예요." else "이동 거리와 들은 이야기 수는 예시예요.", 12, pMuted))
+        val seconds = 12 + 15 * (stops.size + 1)
+        tile("여행 영상", "장면 ${stops.size + 1}개 · 약 ${seconds / 60}분 ${seconds % 60}초", icon = true, gap = 10) { filmPreview(stops, seconds) }
+        tile("여행 책자", "표지 · 지도 · 장소마다 한 쪽 · ${2 + stops.size}쪽", icon = true, gap = 10) {
+            if (photos < 5) message("사진을 5장 이상 담아 주세요.") else bookPreview(stops, photos)
+        }
+        if (past == null) tile("공개 범위", null, trailing = label(visibilityLabel(), 13, pMuted)) { navigate(Screen.DESTINATION) }
         textButton("공유", center = true) { message("공유 기능은 연결 전이에요. 기기 밖으로 보내지 않아요.") }
+    }
+
+    /** What the trip film would hold: 출발 + each stop as a scene. ponytail: preview only — making the film isn't built yet. */
+    private fun filmPreview(stops: List<String>, seconds: Int) {
+        val scenes = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        (listOf("출발") + stops).forEachIndexed { i, name ->
+            scenes.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6))
+                addView(label("${i + 1}", 13, pAccent, bold = true).apply { gravity = Gravity.CENTER; background = oval(pAccentSoft) }, lp(dp(26), dp(26)).apply { marginEnd = dp(12) })
+                addView(label(name, 15, pInk, medium = true), lp(0, WRAP, 1f))
+                addView(label(if (i == 0) "12초" else "15초", 13, pMuted))
+            }, lp(MATCH, WRAP))
+        }
+        popup("여행 영상", "장면 ${stops.size + 1}개를 약 ${seconds / 60}분 ${seconds % 60}초 영상으로 묶어요. 차에서 들은 이야기가 자막으로 들어가요.", scenes,
+            primary = "영상 만들기", secondary = "닫기") { it.dismiss(); message("영상 만들기는 준비 중이에요. 지금은 미리보기만 볼 수 있어요.") }
+    }
+
+    /** What the trip book would hold. ponytail: preview only — making the book isn't built yet. */
+    private fun bookPreview(stops: List<String>, photos: Int) {
+        val pages = listOf("표지" to "여행 이름 · 날짜 · 함께한 사람", "지도" to "다녀온 길 한 장") + stops.map { it to "사진 · 메모 · 들은 이야기" }
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pages.forEachIndexed { i, (name, what) ->
+            list.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6))
+                addView(label("${i + 1}쪽", 13, pAccent, bold = true), lp(dp(40), WRAP))
+                addView(LinearLayout(this@PhoneActivity).apply { orientation = LinearLayout.VERTICAL; addView(label(name, 15, pInk, medium = true)); addView(label(what, 12, pMuted)) }, lp(0, WRAP, 1f))
+            }, lp(MATCH, WRAP))
+        }
+        popup("여행 책자", "${pages.size}쪽, 사진 ${photos}장으로 엮어요. PDF로 받거나 인쇄할 수 있게 만들 거예요.", ScrollView(this).apply { addView(list) },
+            primary = "책자 만들기", secondary = "닫기") { it.dismiss(); message("책자 만들기는 준비 중이에요. 지금은 미리보기만 볼 수 있어요.") }
     }
 
     // ── P14 MY · P15 recap ──────────────────────────────────────────────────
@@ -630,6 +759,7 @@ class PhoneActivity : ScreenActivity() {
         past.addView(label("›", 26, Color.WHITE))
         put(past, gap = 24)
 
+
         put(label("설정", 12, pMuted), gap = 8)
         tile("기본 공개 범위", null, trailing = label(visibilityLabel(), 13, pMuted), gap = 8) { navigate(Screen.DESTINATION) }
         val located = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -667,7 +797,10 @@ class PhoneActivity : ScreenActivity() {
     }
 
     private fun signOut() {
-        popup("로그아웃할까요?", "이 휴대폰에 남긴 기록은 그대로 있어요.", primary = "로그아웃", secondary = "취소") { session.edit().clear().apply(); it.dismiss(); render() }
+        popup("로그아웃할까요?", "이 휴대폰에 남긴 기록은 그대로 있어요.", primary = "로그아웃", secondary = "취소") {
+            session.edit().remove("token").remove("email").remove("tripId").apply() // 저장한 여행 stay on the phone
+            it.dismiss(); render()
+        }
     }
 
     /**
@@ -698,8 +831,87 @@ class PhoneActivity : ScreenActivity() {
         }
     }
 
+    /**
+     * 저장한 여행 on this phone: a JSON list in the private prefs, newest first. Entry = local id, the TripPlan, visibility,
+     * savedAt, and tripId once it is saved to the account too. "currentSaved" = the entry the trip on screen came from.
+     */
+    private fun savedTrips(): MutableList<JSONObject> = runCatching {
+        JSONArray(session.getString("savedTrips", "[]")).let { a -> MutableList(a.length()) { a.getJSONObject(it) } }
+    }.getOrDefault(mutableListOf())
+    private fun keepSavedTrips(list: List<JSONObject>) = session.edit().putString("savedTrips", JSONArray(list).toString()).apply()
+    private fun savedPlan(entry: JSONObject) = TripPlan.fromJson(entry.getJSONObject("plan").toString())
+
+    /**
+     * 일정 저장하기: the trip goes into 저장한 여행 (MY), replacing its own earlier save; it comes back after the app is closed.
+     * Signed in, it is also saved to the account (same server trip as 차로 보내기, so sending later updates it).
+     */
+    private fun saveTrip(places: List<Place>) {
+        val id = session.getString("currentSaved", null) ?: UUID.randomUUID().toString()
+        val entry = JSONObject().put("id", id).put("plan", JSONObject(TripPlan("saved", draft, places).toJson()))
+            .put("visibility", draft.visibility).put("savedAt", Instant.now().toString())
+        serverTripId?.let { entry.put("tripId", it) }
+        keepSavedTrips(listOf(entry) + savedTrips().filter { it.optString("id") != id })
+        session.edit().putString("currentSaved", id).apply()
+        if (signedInAs == null) { message("저장했어요. 홈 → 다른 여행 고르기에서 볼 수 있어요."); return }
+        remote({ api.saveTrip(serverTripId, draft, places) }) { tripId ->
+            session.edit().putString("tripId", tripId).apply()
+            keepSavedTrips(savedTrips().onEach { if (it.optString("id") == id) it.put("tripId", tripId) })
+            message("저장했어요. 계정에도 저장했어요.")
+        }
+    }
+
+    /** Puts a saved trip on screen: its draft and stop order, and its server trip (so 차로 보내기 sends that one). */
+    private fun useSavedTrip(entry: JSONObject) {
+        val plan = savedPlan(entry)
+        draft = plan.draft.also { it.visibility = entry.optString("visibility", it.visibility) }
+        itineraryIds.clear(); itineraryIds.addAll(plan.places.map(Place::id))
+        session.edit().putString("currentSaved", entry.getString("id")).apply {
+            entry.optString("tripId").takeIf(String::isNotEmpty)?.let { putString("tripId", it) } ?: remove("tripId")
+        }.apply()
+    }
+
+    /** Fresh start: the trip last saved or opened comes back (after a rotation the instance state has the live edit instead). */
+    private fun restoreSavedTrip() {
+        // One-off: the first 저장하기 kept a single trip under "savedTrip".
+        session.getString("savedTrip", null)?.let { old ->
+            if (savedTrips().isEmpty()) runCatching {
+                val id = UUID.randomUUID().toString()
+                keepSavedTrips(listOf(JSONObject().put("id", id).put("plan", JSONObject(old)).put("visibility", JSONObject(old).optString("visibility", "나만"))))
+                session.edit().putString("currentSaved", id).apply()
+            }
+            session.edit().remove("savedTrip").apply()
+        }
+        val id = session.getString("currentSaved", null) ?: return
+        savedTrips().find { it.optString("id") == id }?.let { runCatching { useSavedTrip(it) }.onFailure { e -> Log.w("ChagokApi", "Ignoring a broken saved trip", e) } }
+    }
+
+    /**
+     * 홈 → 다른 여행 고르기: the saved trips (newest first) to switch to, ✕ to take one off the list, and 새 여행 만들기.
+     * A trip that was never saved is lost when another one is opened, so the popup says so.
+     */
+    private fun pickTrip() {
+        var dialog: Dialog? = null
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val current = session.getString("currentSaved", null)
+        val saved = savedTrips()
+        if (saved.isEmpty()) list.addView(label("아직 저장한 여행이 없어요. 일정 화면에서 저장하기를 누르면 여기 모여요.", 14, pMuted), lp(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        saved.forEach { entry ->
+            val plan = runCatching { savedPlan(entry) }.getOrNull() ?: return@forEach
+            val here = entry.optString("id") == current
+            val trailing = if (here) pill("지금 여행", pAccent) else label("✕", 18, pMuted).apply {
+                gravity = Gravity.CENTER; minWidth = dp(40); minHeight = dp(40); contentDescription = "${plan.draft.destination} 여행 지우기"
+                setOnClickListener { keepSavedTrips(savedTrips().filter { it.optString("id") != entry.optString("id") }); dialog?.dismiss(); message("목록에서 지웠어요."); pickTrip() }
+            }
+            tile("${plan.draft.destination} 여행", "${dateLabel(plan.draft.departure)} · ${plan.places.size}곳 · ${if (entry.has("tripId")) "계정에도 저장됨" else "이 폰에 저장됨"}",
+                trailing = trailing, gap = 8, into = list, onClick = if (here) null else ({ dialog?.dismiss(); useSavedTrip(entry); render(); message("${plan.draft.destination} 여행으로 바꿨어요.") }))
+        }
+        tile("새 여행 만들기", "목적지부터 5단계", dashed = true, gap = 0, into = list) { dialog?.dismiss(); newTrip(); navigate(Screen.DESTINATION) }
+        dialog = popup("다른 여행 고르기", if (current == null) "지금 여행은 아직 저장하지 않았어요. 다른 여행을 열기 전에 일정 화면에서 저장해 두세요." else null,
+            ScrollView(this).apply { addView(list) }, primary = null, secondary = "닫기")
+    }
+
     /** A new trip gets its own server trip: forget the last one so 차로 보내기 doesn't overwrite it. */
-    private fun newTrip() { session.edit().remove("tripId").apply() }
+    private fun newTrip() { session.edit().remove("tripId").remove("currentSaved").apply() }
 
     /** MY → 차량 연결: an 8-digit code (5 minutes) to type into the car app's 폰과 연결하기 (POST /v1/pairings). */
     private fun pairCar() {
@@ -790,9 +1002,8 @@ class PhoneActivity : ScreenActivity() {
         if (push) navigate(Screen.PAST) else { shownScreen = null; render() }
     }
 
-    /** P16: one past trip per page — dates, region, map, each stop with time · address · note · photos, then the photos. */
+    /** P16: fixed header (이전, title, n / N, dots) and one past trip per page below it; the page turns sideways (pastPager). */
     private fun past() {
-        val trip = pastTrips[pastIndex]
         pageHeader("지난 여행 돌아보기", trailing = "${pastIndex + 1} / ${pastTrips.size}")
         val dots = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
         pastTrips.indices.forEach { i ->
@@ -800,41 +1011,55 @@ class PhoneActivity : ScreenActivity() {
                 lp(dp(if (i == pastIndex) 18 else 6), dp(6)).apply { marginEnd = dp(5) })
         }
         put(dots, gap = 14)
-
-        val head = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(18), dp(20), dp(18)); background = cardBg(); lift(this) }
-        head.addView(label(trip.title, 22, pInk, bold = true))
-        head.addView(label("${trip.dates} · ${trip.region} · ${trip.who}", 13, pMuted), lp(MATCH, WRAP).apply { topMargin = dp(4); bottomMargin = dp(12) })
-        val stats = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("${trip.km}km", "장소 ${trip.stops.size}곳", "사진 ${trip.stops.sumOf { it.photos }}장").forEach {
-            stats.addView(pill(it, pAccent), lp(WRAP, WRAP).apply { marginEnd = dp(6) })
-        }
-        head.addView(stats)
-        put(head)
-        map()
-        timelineCard(trip.stops.map {
-            TimeRow(it.time, it.name, sub = listOf(it.where, it.note).filter(String::isNotEmpty).joinToString("\n"), right = "사진 ${it.photos}")
-        }, meta = "다녀온 곳", tag = trip.who)
-        put(label("사진 ${trip.stops.sumOf { it.photos }}장 · 예시", 12, pMuted), gap = 8)
-        trip.stops.flatMap { stop -> List(stop.photos) { stop.name } }.take(9).chunked(3).forEach { names ->
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            names.forEach { name ->
-                row.addView(FrameLayout(this).apply {
-                    background = shape(pFill, null, 16f); contentDescription = "$name 사진 예시"
-                    addView(label(name, 10, pMuted), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { setMargins(dp(8), 0, dp(6), dp(6)) })
-                }, lp(0, dp(96), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
-            }
-            repeat(3 - names.size) { row.addView(View(this), lp(0, dp(96), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }) }
-            put(row, gap = 0)
-        }
-        put(label("옆으로 밀거나 아래 버튼으로 다른 여행을 볼 수 있어요. 기록은 예시예요.", 12, pMuted).apply { setPadding(0, dp(10), 0, 0) })
+        content.clipChildren = false // let the pages slide across the 20dp side padding to the screen edge
+        val pager = FrameLayout(this).apply { clipChildren = false }
+        pager.addView(pastPage(pastIndex), FrameLayout.LayoutParams(MATCH, WRAP))
+        put(pager, gap = 0); pastPager = pager
 
         actions.visibility = View.VISIBLE
-        val pager = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        pager.addView(actionButton("‹ 이전 여행", primary = false) { showPast(pastIndex - 1) }.apply { isEnabled = pastIndex > 0; alpha = if (isEnabled) 1f else 0.4f },
+        val turner = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        turner.addView(actionButton("‹ 이전 여행", primary = false) { settlePast(pager, -1) }.apply { isEnabled = pastIndex > 0; alpha = if (isEnabled) 1f else 0.4f },
             lp(0, dp(52), 1f).apply { marginEnd = dp(10) })
-        pager.addView(actionButton("다음 여행 ›", primary = true) { showPast(pastIndex + 1) }.apply { isEnabled = pastIndex < pastTrips.lastIndex; alpha = if (isEnabled) 1f else 0.4f },
+        turner.addView(actionButton("다음 여행 ›", primary = true) { settlePast(pager, 1) }.apply { isEnabled = pastIndex < pastTrips.lastIndex; alpha = if (isEnabled) 1f else 0.4f },
             lp(0, dp(52), 1f))
-        actions.addView(pager, lp(MATCH, WRAP))
+        actions.addView(turner, lp(MATCH, WRAP))
+    }
+
+    /** One trip page: summary card, map, stops, photos. Built with the usual helpers by pointing `content` at the page. */
+    private fun pastPage(index: Int): LinearLayout {
+        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val screenContent = content; content = page
+        try {
+            val trip = pastTrips[index]
+            val head = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(18), dp(20), dp(18)); background = cardBg(); lift(this) }
+            head.addView(label(trip.title, 22, pInk, bold = true))
+            head.addView(label("${trip.dates} · ${trip.region} · ${trip.who}", 13, pMuted), lp(MATCH, WRAP).apply { topMargin = dp(4); bottomMargin = dp(12) })
+            val stats = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            listOf("${trip.km}km", "장소 ${trip.stops.size}곳", "사진 ${trip.stops.sumOf { it.photos }}장").forEach {
+                stats.addView(pill(it, pAccent), lp(WRAP, WRAP).apply { marginEnd = dp(6) })
+            }
+            head.addView(stats)
+            put(head, gap = 10)
+            tile("여행 요약 · 영상 · 책자", "이 여행을 한눈에 보고 영상이나 책자로 만들어요", trailing = label("›", 22, pMuted)) { summaryPast = index; navigate(Screen.SUMMARY) }
+            map()
+            timelineCard(trip.stops.map {
+                TimeRow(it.time, it.name, sub = listOf(it.where, it.note).filter(String::isNotEmpty).joinToString("\n"), right = "사진 ${it.photos}")
+            }, meta = "다녀온 곳", tag = trip.who)
+            put(label("사진 ${trip.stops.sumOf { it.photos }}장 · 예시", 12, pMuted), gap = 8)
+            trip.stops.flatMap { stop -> List(stop.photos) { stop.name } }.take(9).chunked(3).forEach { names ->
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                names.forEach { name ->
+                    row.addView(FrameLayout(this).apply {
+                        background = shape(pFill, null, 16f); contentDescription = "$name 사진 예시"
+                        addView(label(name, 10, pMuted), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { setMargins(dp(8), 0, dp(6), dp(6)) })
+                    }, lp(0, dp(96), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+                }
+                repeat(3 - names.size) { row.addView(View(this), lp(0, dp(96), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }) }
+                put(row, gap = 0)
+            }
+            put(label("옆으로 밀거나 아래 버튼으로 다른 여행을 볼 수 있어요. 기록은 예시예요.", 12, pMuted).apply { setPadding(0, dp(10), 0, 0) })
+        } finally { content = screenContent }
+        return page
     }
 
     private class Slide(val dark: Boolean, val kicker: String, val big: String, val caption: String, val items: List<String> = emptyList(), val orb: Boolean = false)
@@ -1067,75 +1292,122 @@ class PhoneActivity : ScreenActivity() {
      * place (18sp medium) · note (14sp); middle dots deep, the last one pale; hairline and a foot line when given.
      */
     private fun timelineCard(rows: List<TimeRow>, meta: String? = null, tag: String? = null, foot: String? = null,
-                             onMove: ((from: Int, to: Int) -> Unit)? = null, onClick: (() -> Unit)? = null): LinearLayout {
-        val rowViews = mutableListOf<View>()
+                             onMove: ((from: Int, to: Int) -> Unit)? = null, action: String? = null, onClick: (() -> Unit)? = null): LinearLayout {
+        val rowViews = mutableListOf<LinearLayout>()
+        // Draggable rows get 8dp side padding so the lifted row reads as a card; the card gives that back (20 → 12).
+        val side = if (onMove != null) 8 else 0
         val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(18), dp(20), dp(15)); background = cardBg(); lift(this)
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20 - side), dp(18), dp(20 - side), dp(15)); background = cardBg(); lift(this)
             if (onClick != null) { isClickable = true; foreground = ripple(22f); setOnClickListener { onClick() } }
         }
         if (meta != null || tag != null) card.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(side), 0, dp(side), 0)
             addView(label(meta.orEmpty(), 14, pMuted), lp(0, WRAP, 1f)); tag?.let { addView(pill(it, pAccent)) }
         }, lp(MATCH, WRAP).apply { bottomMargin = dp(10) })
         rows.forEachIndexed { i, r ->
             val last = i == rows.lastIndex
             val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(40)
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(40); setPadding(dp(side), 0, dp(side), 0)
                 contentDescription = r.description ?: listOfNotNull(r.time, r.title, r.sub, r.right).joinToString(", ")
             }
             rowViews += row
             row.addView(label(r.time, 15, pMuted).apply { fontFeatureSettings = "tnum" }, lp(dp(59), WRAP))
+            val rail = Triple(View(this), View(this), View(this)) // line above, dot, line below; coloured by position in paintRail
+            row.tag = rail
             row.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
-                addView(View(this@PhoneActivity).apply { setBackgroundColor(if (i > 0) pRail else Color.TRANSPARENT) }, lp(dp(2), 0, 1f))
-                addView(View(this@PhoneActivity).apply { background = oval(if (last && rows.size > 1) pDot else pAccent) }, lp(dp(11), dp(11)))
-                addView(View(this@PhoneActivity).apply { setBackgroundColor(if (!last) pRail else Color.TRANSPARENT) }, lp(dp(2), 0, 1f))
+                addView(rail.first, lp(dp(2), 0, 1f)); addView(rail.second, lp(dp(11), dp(11))); addView(rail.third, lp(dp(2), 0, 1f))
             }, lp(dp(32), MATCH))
             row.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; if (r.sub != null) setPadding(0, dp(8), dp(8), dp(8))
                 addView(label(r.title, if (r.sub == null) 18 else 17, pInk, medium = true)); r.sub?.let { addView(label(it, 13, pMuted)) }
             }, lp(0, WRAP, 1f))
             r.right?.let { row.addView(label(it, 14, pMuted)) }
-            if (onMove != null && rows.size > 1) dragHandle(row, i, rowViews, rows.lastIndex, onMove)
+            if (onMove != null && rows.size > 1) dragHandle(row, rowViews, onMove)
             card.addView(row, lp(MATCH, WRAP))
         }
+        paintRail(rowViews)
         if (foot != null) {
-            card.addView(View(this).apply { setBackgroundColor(pLine) }, lp(MATCH, dp(1)).apply { topMargin = dp(9) })
-            card.addView(label(foot, 13, pMuted), lp(MATCH, WRAP).apply { topMargin = dp(11) })
+            card.addView(View(this).apply { setBackgroundColor(pLine) }, lp(MATCH, dp(1)).apply { topMargin = dp(9); marginStart = dp(side); marginEnd = dp(side) })
+            card.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(side), 0, dp(side), 0)
+                addView(label(foot, 13, pMuted), lp(0, WRAP, 1f))
+                action?.let { addView(label(it, 13, pAccent, medium = true), lp(WRAP, WRAP).apply { marginStart = dp(8) }) }
+            }, lp(MATCH, WRAP).apply { topMargin = dp(11) })
         }
         put(card)
         return card
     }
 
+    /** Timeline rail by position: no line above the first dot or below the last; the last dot is pale. */
+    @Suppress("UNCHECKED_CAST")
+    private fun paintRail(rows: List<View>) = rows.forEachIndexed { i, r ->
+        val (above, dot, below) = r.tag as Triple<View, View, View>
+        above.setBackgroundColor(if (i > 0) pRail else Color.TRANSPARENT)
+        below.setBackgroundColor(if (i < rows.lastIndex) pRail else Color.TRANSPARENT)
+        dot.background = oval(if (i == rows.lastIndex && rows.size > 1) pDot else pAccent)
+    }
+
     /**
-     * Drag to reorder: press ≡ and move; the row follows the finger and the rows it passes slide out of the way.
-     * TalkBack gets 위로/아래로 이동 actions instead, since a drag can't be done by swipes.
+     * Drag to reorder with the ≡ handle. Press: the row lifts as a white card (shadow, 3% larger, a tick of vibration) and its
+     * own rail hides, so the line behind stays whole. Move: it follows the finger inside the card; the rows it passes slide
+     * aside (tick on each change). Release: it glides into its slot and only the row order changes — no screen rebuild, so
+     * nothing flashes. TalkBack gets 위로/아래로 이동 actions instead.
      */
     @SuppressLint("ClickableViewAccessibility")
-    private fun dragHandle(row: LinearLayout, index: Int, rowViews: List<View>, last: Int, reorder: (Int, Int) -> Unit) {
-        var startY = 0f; var target = index
-        // Rebuild after the touch/accessibility event is done: render() inside it removes the views still being dispatched (crash).
-        val onMove = { from: Int, to: Int -> rowViews.forEach { it.animate().cancel() }; window.decorView.post { reorder(from, to) }; Unit }
+    private fun dragHandle(row: LinearLayout, rowViews: MutableList<LinearLayout>, onMove: (Int, Int) -> Unit) {
+        val ease = DecelerateInterpolator()
+        var startY = 0f; var from = 0; var target = 0
+        fun center(v: View) = v.top + v.height / 2f
+        // Put the row at [to] for real: reorder the card's children (positions reset), repaint the rail, update the data.
+        fun commit(to: Int) {
+            val card = row.parent as? LinearLayout ?: return
+            val first = card.indexOfChild(rowViews[0])
+            rowViews.forEach { it.animate().cancel(); it.translationY = 0f }
+            rowViews.removeAt(from); rowViews.add(to, row)
+            rowViews.forEach { card.removeView(it) }
+            rowViews.forEachIndexed { i, v -> card.addView(v, first + i) }
+            row.background = null; row.translationZ = 0f; row.scaleX = 1f; row.scaleY = 1f
+            paintRail(rowViews)
+            if (to != from) onMove(from, to)
+        }
         row.addView(label("≡", 22, pMuted).apply {
             gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             setOnTouchListener { handle, e ->
                 when (e.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         handle.parent.requestDisallowInterceptTouchEvent(true) // keep the page from scrolling
-                        startY = e.rawY; target = index
-                        row.background = shape(pSurface, null, 14f); row.elevation = dpf(10f); row.animate().scaleX(1.02f).scaleY(1.02f).setDuration(120).start()
+                        startY = e.rawY; from = rowViews.indexOf(row); target = from
+                        row.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        @Suppress("UNCHECKED_CAST") (row.tag as Triple<View, View, View>).let { it.first.setBackgroundColor(Color.TRANSPARENT); it.third.setBackgroundColor(Color.TRANSPARENT) }
+                        row.background = shape(pSurface, pLine, 16f, strokeDp = 1f)
+                        row.animate().scaleX(1.03f).scaleY(1.03f).translationZ(dpf(12f)).setInterpolator(ease).setDuration(150).start()
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        val dy = e.rawY - startY; val h = row.height.toFloat()
+                        val h = row.height.toFloat()
+                        val dy = (e.rawY - startY).coerceIn(rowViews.first().top - row.top.toFloat(), rowViews.last().bottom - row.bottom.toFloat())
                         row.translationY = dy
-                        target = (index + Math.round(dy / h)).coerceIn(0, last)
-                        rowViews.forEachIndexed { j, other ->
-                            if (j != index) other.animate().translationY(when { j in index + 1..target -> -h; j in target until index -> h; else -> 0f }).setDuration(120).start()
+                        // Leading edge decides: going down, the row's bottom passes a neighbour's middle; going up, its top does.
+                        // (Its centre can't reach the last row's middle when that row is shorter — the drag is clamped to the card.)
+                        val next = from + rowViews.withIndex().count { (j, v) -> j > from && center(v) < row.bottom + dy } -
+                            rowViews.withIndex().count { (j, v) -> j < from && center(v) > row.top + dy }
+                        if (next != target) {
+                            target = next; row.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            rowViews.forEachIndexed { j, other ->
+                                if (other !== row) other.animate().translationY(when { j in from + 1..target -> -h; j in target until from -> h; else -> 0f })
+                                    .setInterpolator(ease).setDuration(180).start()
+                            }
                         }
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (target != index) onMove(index, target)
-                        else { row.animate().translationY(0f).scaleX(1f).scaleY(1f).setDuration(120).start(); row.elevation = 0f; row.background = null }
+                        val slot = when {
+                            target > from -> rowViews.subList(from + 1, target + 1).sumOf { it.height }.toFloat()
+                            target < from -> -rowViews.subList(target, from).sumOf { it.height }.toFloat()
+                            else -> 0f
+                        }
+                        val to = target
+                        row.animate().translationY(slot).scaleX(1f).scaleY(1f).translationZ(0f).setInterpolator(ease).setDuration(180)
+                            .withEndAction { commit(to) }.start()
                     }
                 }
                 true
@@ -1144,13 +1416,16 @@ class PhoneActivity : ScreenActivity() {
         row.accessibilityDelegate = object : View.AccessibilityDelegate() {
             override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
                 super.onInitializeAccessibilityNodeInfo(host, info)
-                if (index > 0) info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.move_up, "위로 이동"))
-                if (index < last) info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.move_down, "아래로 이동"))
+                val i = rowViews.indexOf(row)
+                if (i > 0) info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.move_up, "위로 이동"))
+                if (i < rowViews.lastIndex) info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.move_down, "아래로 이동"))
             }
-            override fun performAccessibilityAction(host: View, action: Int, args: Bundle?) = when (action) {
-                R.id.move_up -> { onMove(index, index - 1); true }
-                R.id.move_down -> { onMove(index, index + 1); true }
-                else -> super.performAccessibilityAction(host, action, args)
+            override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
+                val step = when (action) { R.id.move_up -> -1; R.id.move_down -> 1; else -> return super.performAccessibilityAction(host, action, args) }
+                from = rowViews.indexOf(row)
+                val to = (from + step).coerceIn(0, rowViews.lastIndex)
+                window.decorView.post { commit(to) } // not inside the accessibility dispatch
+                return true
             }
         }
     }
@@ -1277,7 +1552,7 @@ class PhoneActivity : ScreenActivity() {
         out.putString("filter", filter); out.putString("photoTab", photoTab); out.putStringArrayList("selected", ArrayList(selectedPlaces))
         out.putIntegerArrayList("photos", ArrayList(selectedPhotos)); out.putIntegerArrayList("recorded", ArrayList(recordedPhotos))
         out.putStringArrayList("moments", ArrayList(moments)); out.putInt("recap", recapIndex)
-        out.putInt("past", pastIndex)
+        out.putInt("past", pastIndex); out.putInt("summaryPast", summaryPast ?: -1)
         out.putStringArrayList("driveEvents", ArrayList(driveEvents.map { it.toJson() }))
         super.onSaveInstanceState(out)
     }
@@ -1287,7 +1562,7 @@ class PhoneActivity : ScreenActivity() {
         selectedPlaces.clear(); selectedPlaces.addAll(state.getStringArrayList("selected").orEmpty())
         selectedPhotos.addAll(state.getIntegerArrayList("photos").orEmpty()); recordedPhotos.addAll(state.getIntegerArrayList("recorded").orEmpty())
         moments.addAll(state.getStringArrayList("moments").orEmpty()); recapIndex = state.getInt("recap")
-        pastIndex = state.getInt("past")
+        pastIndex = state.getInt("past"); summaryPast = state.getInt("summaryPast", -1).takeIf { it >= 0 }
         driveEvents.addAll(state.getStringArrayList("driveEvents").orEmpty().mapNotNull { runCatching { DriveEvent.fromJson(it) }.getOrNull() })
     }
 }

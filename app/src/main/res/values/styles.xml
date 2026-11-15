@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.Chagok" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:fontFamily">sans</item>
+        <item name="android:fontFamily">@font/suit</item>
         <item name="android:colorAccent">@color/phone_accent</item>
         <item name="android:windowBackground">@color/phone_bg_mid</item>
         <item name="android:statusBarColor">@color/phone_bg_top</item>
@@ -17,7 +17,7 @@
         <item name="android:layout_height">wrap_content</item>
         <item name="android:textSize">23sp</item>
         <item name="android:textColor">@color/ink</item>
-        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:fontFamily">@font/suit_semibold</item>
     </style>
     <style name="Text.Body" parent="">
         <item name="android:layout_width">match_parent</item>

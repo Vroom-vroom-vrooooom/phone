@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- App icon, 차곡 R4 라이트: full square background, symbol 72% of the visible width on the phone (guide: 64%; user asked for a bit bigger), centred; the launcher masks the corners.
-     Adaptive icon: 108dp layer, 72dp visible → symbol 52dp wide, 37.3dp tall (diagonal 64dp, inside the 66dp safe circle). Pleos Connect icon spec still to check (contest guide). -->
+<!-- App icon, 차곡 R4 흑백 최종 라이트: full square background, symbol 72% of the visible width on the phone (guide: 64%; user asked for a bit bigger), centred; the launcher masks the corners.
+     Adaptive icon: 108dp layer, 72dp visible → symbol 52dp wide, 36.5dp tall (inside the 66dp safe circle). Pleos Connect icon spec still to check (contest guide). -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background>
         <color android:color="#FFFFFF" />
     </background>
     <foreground>
-        <inset android:drawable="@drawable/logo_symbol" android:insetLeft="28dp" android:insetRight="28dp" android:insetTop="35.3dp" android:insetBottom="35.3dp" />
+        <inset android:drawable="@drawable/logo_symbol" android:insetLeft="28dp" android:insetRight="28dp" android:insetTop="35.75dp" android:insetBottom="35.75dp" />
     </foreground>
 </adaptive-icon>

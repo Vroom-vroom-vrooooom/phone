@@ -408,8 +408,18 @@ class PhoneActivity : ScreenActivity() {
             setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_fan_pin, 0, 0, 0); compoundDrawablePadding = dp(12)
             compoundDrawableTintList = ColorStateList.valueOf(pMuted)
             addTextChangedListener(SimpleTextWatcher { draft.destination = it })
+            setPadding(dp(18), 0, dp(64), 0)
         }
-        put(input, gap = 12)
+        // 음성으로 목적지 말하기: the system speech recognizer (no audio permission needed for the intent).
+        val mic = FrameLayout(this).apply {
+            background = shape(pInk, null, 999f); isClickable = true; isFocusable = true; contentDescription = "목적지 말하기"
+            addView(ImageView(context).apply { setImageResource(R.drawable.ic_mic); imageTintList = ColorStateList.valueOf(Color.WHITE) }, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
+            setOnClickListener { listenForDestination() }
+        }
+        put(FrameLayout(this).apply {
+            addView(input, FrameLayout.LayoutParams(MATCH, dp(56)))
+            addView(mic, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.CENTER_VERTICAL).apply { marginEnd = dp(6) })
+        }, gap = 12)
         grid(listOf(fieldButton("출발", dateLabel(draft.departure)) { chooseDate(false) },
             fieldButton("종료", dateLabel(draft.endDate), muted = draft.endDate == "미정") { chooseDate(true) }), 2, 56, gap = 12)
         val toggle = Switch(this).apply {
@@ -645,6 +655,23 @@ class PhoneActivity : ScreenActivity() {
             val coords = String.format(Locale.US, "%.4f, %.4f", location.latitude, location.longitude)
             runOnUiThread { locating = false; nearby = name to "$coords · 근처에 아는 장소가 없어요"; render() }
         }.start()
+    }
+
+    private fun listenForDestination() {
+        val intent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+            .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "어디로 갈까요?")
+        runCatching { startActivityForResult(intent, REQUEST_SPEECH) }.onFailure { message("이 기기에서는 음성 입력을 쓸 수 없어요") }
+    }
+
+    @Deprecated("Activity result API is not used in this single-activity app")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_SPEECH || resultCode != RESULT_OK) return
+        data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            draft.destination = it; render()
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
@@ -1699,5 +1726,6 @@ private class FlowLayout(context: Context, private val gap: Int) : ViewGroup(con
 }
 
 private const val REQUEST_LOCATION = 7
+private const val REQUEST_SPEECH = 8
 private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
